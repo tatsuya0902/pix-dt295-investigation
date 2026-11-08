@@ -1,0 +1,547 @@
+diff --git a/server/app/streams/LiveStream.py b/server/app/streams/LiveStream.py
+index 111dc77..42b4f39 100644
+--- a/server/app/streams/LiveStream.py
++++ b/server/app/streams/LiveStream.py
+@@ -50,6 +50,11 @@ class LiveStreamClient:
+         ## 最終読み取り時刻から 10 秒経過したクライアントは LiveStream.writeStreamData() でタイムアウトと判断され、削除される
+         self._stream_data_read_at: float = time.time()
+ 
++        # Queue からのデータ到着を待っているかを保持する
++        ## readStreamData() の待機中は出力先の読み取り停滞ではないため、
++        ## LiveStream.writeStreamData() のクライアントタイムアウト対象から外す
++        self._stream_data_read_pending: bool = False
++
+ 
+     @property
+     def stream_data_read_at(self) -> float:
+@@ -57,6 +62,12 @@ class LiveStreamClient:
+         return self._stream_data_read_at
+ 
+ 
++    @property
++    def stream_data_read_pending(self) -> bool:
++        """ Queue からのデータ到着を待機中かどうか (読み取り専用) """
++        return self._stream_data_read_pending
++
++
+     async def readStreamData(self) -> bytes | None:
+         """
+         自分自身の Queue からストリームデータを読み取って返す
+@@ -73,14 +84,19 @@ class LiveStreamClient:
+         if self.client_type != 'mpegts':
+             return None
+ 
+-        # ストリームデータの最終読み取り時刻を更新
+-        self._stream_data_read_at = time.time()
+-
+         # Queue から読み取ったストリームデータを返す
++        ## チューナー準備やエンコーダー起動に時間がかかっても、データを待機中の
++        ## HTTP 接続を読み取り停滞と誤判定しないよう、待機状態を明示する
++        self._stream_data_read_pending = True
+         try:
+-            return await self._queue.get()
++            stream_data = await self._queue.get()
++            self._stream_data_read_at = time.time()
++            return stream_data
+         except TypeError:
+             return None
++        finally:
++            # キャンセルや例外でも待機状態を解除し、切断済み接続を保持し続けない
++            self._stream_data_read_pending = False
+ 
+ 
+     def writeStreamData(self, stream_data: bytes | None) -> None:
+@@ -662,7 +678,8 @@ class LiveStream:
+ 
+             # 最終読み取り時刻を指定秒数過ぎたクライアントはタイムアウトと判断し、クライアントを削除する
+             ## 主にネットワークが切断されたなどの理由で発生する
+-            if now - client.stream_data_read_at > timeout:
++            ## Queue で入力データを待機中の接続は、出力先の読み取り停滞と区別する
++            if client.stream_data_read_pending is False and now - client.stream_data_read_at > timeout:
+                 self._clients.remove(client)
+                 logging.info(f'{self.log_prefix} Client Disconnected (Timeout). Client ID: {client.client_id}')
+                 del client
+diff --git a/server/tests/test_live_stream_client_timeout.py b/server/tests/test_live_stream_client_timeout.py
+new file mode 100644
+index 0000000..a2cf24c
+--- /dev/null
++++ b/server/tests/test_live_stream_client_timeout.py
+@@ -0,0 +1,86 @@
++import asyncio
++import contextlib
++import unittest
++from unittest.mock import patch
++
++from app.streams.LiveStream import LiveStream, LiveStreamClient
++
++
++class LiveStreamClientTimeoutTest(unittest.IsolatedAsyncioTestCase):
++    """データ待機と出力先の読み取り停滞を区別する。"""
++
++    async def asyncSetUp(self) -> None:
++        # 実時間を待たず、初期化が10秒を超える状況を再現する。
++        self.clock_patch = patch('app.streams.LiveStream.time.time', return_value=1000.0)
++        self.clock = self.clock_patch.start()
++        self.stream = LiveStream(f'test-{self._testMethodName}', '720p')
++        self.client = LiveStreamClient(self.stream, 'mpegts')
++        self.stream._clients = [self.client]
++        self.reader: asyncio.Task[bytes | None] | None = None
++
++    async def asyncTearDown(self) -> None:
++        # 失敗した試験でも待機タスクを次の試験へ残さない。
++        if self.reader is not None:
++            self.reader.cancel()
++            with contextlib.suppress(asyncio.CancelledError):
++                await self.reader
++        self.clock_patch.stop()
++
++    async def testInitialDataAfterLongStartupUsesOriginalClient(self) -> None:
++        """31秒の起動待ち後も同じHTTPクライアントが最初のデータを受け取る。"""
++        self.reader = asyncio.create_task(self.client.readStreamData())
++        await asyncio.sleep(0)
++        self.clock.return_value = 1031.0
++        self.stream.writeStreamData(b'first transport packets')
++        self.assertIn(self.client, self.stream._clients)
++        self.assertEqual(await asyncio.wait_for(self.reader, 0.2), b'first transport packets')
++        self.assertEqual(self.client.stream_data_read_at, 1031.0)
++
++    async def testWaitingReaderAfterTransmissionGapRemainsConnected(self) -> None:
++        """配信途中の入力待ちでも、待機中の読み取りタスクへデータを渡す。"""
++        self.client.writeStreamData(b'first')
++        self.assertEqual(await self.client.readStreamData(), b'first')
++        self.reader = asyncio.create_task(self.client.readStreamData())
++        await asyncio.sleep(0)
++        self.clock.return_value = 1011.0
++        self.stream.writeStreamData(b'next')
++        self.assertIn(self.client, self.stream._clients)
++        self.assertEqual(await asyncio.wait_for(self.reader, 0.2), b'next')
++
++    async def testNonReadingClientStillExpiresAfterTenSeconds(self) -> None:
++        """読み取りを開始しないクライアントの10秒制限は保持する。"""
++        self.clock.return_value = 1011.0
++        self.stream.writeStreamData(b'data')
++        self.assertNotIn(self.client, self.stream._clients)
++
++    async def testBlockedOutputStillExpiresAfterConsumption(self) -> None:
++        """消費後に次の読み取りへ進めない接続も10秒で回収する。"""
++        self.client.writeStreamData(b'first')
++        self.assertEqual(await self.client.readStreamData(), b'first')
++        self.clock.return_value = 1011.0
++        self.stream.writeStreamData(b'next')
++        self.assertNotIn(self.client, self.stream._clients)
++
++    async def testCancelledReadDoesNotRetainTimeoutExemption(self) -> None:
++        """キャンセル済みの読み取りは待機中として扱わない。"""
++        self.reader = asyncio.create_task(self.client.readStreamData())
++        await asyncio.sleep(0)
++        self.reader.cancel()
++        with contextlib.suppress(asyncio.CancelledError):
++            await self.reader
++        self.clock.return_value = 1011.0
++        self.stream.writeStreamData(b'data')
++        self.assertNotIn(self.client, self.stream._clients)
++
++    async def testEncoderEndSentinelReachesWaitingClient(self) -> None:
++        """待機中にエンコーダーが終わった場合は終了通知を返す。"""
++        self.reader = asyncio.create_task(self.client.readStreamData())
++        await asyncio.sleep(0)
++        self.clock.return_value = 1031.0
++        self.client.writeStreamData(None)
++        self.assertIsNone(await asyncio.wait_for(self.reader, 0.2))
++        self.assertEqual(self.client.stream_data_read_at, 1031.0)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/client/src/components/Watch/Watch.vue b/client/src/components/Watch/Watch.vue
+index e87d93c..aae90b9 100644
+--- a/client/src/components/Watch/Watch.vue
++++ b/client/src/components/Watch/Watch.vue
+@@ -4,6 +4,7 @@
+                 'watch-container--control-display': playerStore.is_control_display,
+                 'watch-container--panel-display': Utils.isSmartphoneVertical() || Utils.isTabletVertical() ? true : playerStore.is_panel_display,
+                 'watch-container--fullscreen': playerStore.is_fullscreen,
++                'watch-container--pseudo-fullscreen': playerStore.is_pseudo_fullscreen,
+                 'watch-container--document-pip': playerStore.is_document_pip,
+                 'watch-container--video': playback_mode === 'Video',
+             }">
+@@ -63,6 +64,13 @@ export default defineComponent({
+         ...mapStores(usePlayerStore, useSettingsStore),
+     },
+     watch: {
++        // 視聴画面が存在する間だけスクロールを抑え、通常ページへ戻す際は解除する
++        'playerStore.is_pseudo_fullscreen': {
++            immediate: true,
++            handler(isPseudoFullscreen: boolean) {
++                document.documentElement.classList.toggle('watch-pseudo-fullscreen', isPseudoFullscreen);
++            },
++        },
+         // 前回視聴画面を開いた際にパネルが表示されていたかどうかを随時保存する
+         'playerStore.is_panel_display': {
+             handler() {
+@@ -94,6 +102,8 @@ export default defineComponent({
+     // 終了前に実行
+     beforeUnmount() {
+ 
++        document.documentElement.classList.remove('watch-pseudo-fullscreen');
++
+         // PlayerStore に視聴画面を閉じたことを伝える
+         this.playerStore.stopWatching();
+ 
+@@ -107,6 +117,41 @@ export default defineComponent({
+ </script>
+ <style lang="scss">
+ 
++// Safari のブラウザ UI は残し、現在表示可能な領域にプレイヤー全体を収める
++html.watch-pseudo-fullscreen,
++html.watch-pseudo-fullscreen body {
++    overflow: hidden !important;
++    overscroll-behavior: none;
++}
++
++.watch-container.watch-container--fullscreen.watch-container--pseudo-fullscreen {
++    position: fixed;
++    top: 0;
++    left: 0;
++    z-index: 1000;
++    box-sizing: border-box;
++    width: 100%;
++    height: 100%;
++    height: 100dvh;
++    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
++    background: rgb(var(--v-theme-black));
++    transition: none;
++
++    // パネルの保存済み表示設定は変えず、この表示中だけ映像領域を優先する
++    .watch-navigation, .watch-header, .watch-panel, .watch-player__button {
++        display: none !important;
++    }
++    .watch-content, .watch-player, .watch-player__dplayer {
++        width: 100%;
++        height: 100%;
++        min-height: 0;
++        aspect-ratio: auto;
++    }
++    .watch-content {
++        flex: 1;
++    }
++}
++
+ // 上書きしたいスタイル
+ 
+ // コントロール表示時
+@@ -466,4 +511,4 @@ export default defineComponent({
+     }
+ }
+ 
+-</style>
+\ No newline at end of file
++</style>
+diff --git a/client/src/services/player/PlayerController.ts b/client/src/services/player/PlayerController.ts
+index 4d56be1..23a105a 100644
+--- a/client/src/services/player/PlayerController.ts
++++ b/client/src/services/player/PlayerController.ts
+@@ -71,6 +71,9 @@ class PlayerController {
+     // 保持しておかないと disconnect() で ResizeObserver を止められない
+     private player_container_resize_observer: ResizeObserver | null = null;
+ 
++    // 再生の再初期化時に、全画面と Escape のイベントを重複登録しないための後片付け
++    private fullscreen_handler_cleanup: (() => void) | null = null;
++
+     // setControlDisplayTimer() で利用するタイマー ID
+     // 保持しておかないと clearTimeout() でタイマーを止められない
+     private player_control_ui_hide_timer_id: number = 0;
+@@ -1576,13 +1579,25 @@ class PlayerController {
+     private setupFullscreenHandler(): void {
+         assert(this.player !== null);
+         const player_store = usePlayerStore();
++        const player = this.player;
++
++        // 再初期化で残ったイベントを解除し、現在のプレイヤーだけを操作する
++        this.fullscreen_handler_cleanup?.();
++
++        // 動画だけをネイティブ全画面へ移すと字幕・コメントが失われるため、
++        // API が使えない場合は既存のプレイヤー DOM 全体を CSS で広げる
++        const enter_pseudo_fullscreen = () => {
++            if (this.player !== player || this.destroying || this.destroyed) return;
++            player_store.is_pseudo_fullscreen = true;
++            player_store.is_fullscreen = true;
++        };
+ 
+         // フルスクリーンにするコンテナ要素 (ページ全体)
+         const fullscreen_container = document.body;
+ 
+         // フルスクリーンかどうか
+         this.player.fullScreen.isFullScreen = (type?: DPlayerType.FullscreenType) => {
+-            return !!(document.fullscreenElement || document.webkitFullscreenElement);
++            return player_store.is_pseudo_fullscreen || !!(document.fullscreenElement || document.webkitFullscreenElement);
+         };
+ 
+         // フルスクリーンをリクエスト
+@@ -1595,45 +1610,67 @@ class PlayerController {
+             }
+             // フルスクリーンをリクエスト
+             // Safari は webkit のベンダープレフィックスが必要
+-            fullscreen_container.requestFullscreen = fullscreen_container.requestFullscreen || fullscreen_container.webkitRequestFullscreen;
+-            if (fullscreen_container.requestFullscreen) {
+-                fullscreen_container.requestFullscreen();
++            const request_fullscreen = fullscreen_container.requestFullscreen || fullscreen_container.webkitRequestFullscreen;
++            if (request_fullscreen) {
++                // API の存在だけでは利用可否が分からないため、同期例外と拒否も扱う
++                try {
++                    Promise.resolve(request_fullscreen.call(fullscreen_container)).catch(enter_pseudo_fullscreen);
++                } catch {
++                    enter_pseudo_fullscreen();
++                }
+             } else {
+-                // フルスクリーンがサポートされていない場合はエラーを表示
+-                this.player.notice('iPhone Safari は動画のフルスクリーン表示に対応していません。', undefined, undefined, '#FF6F6A');
++                enter_pseudo_fullscreen();
+                 return;
+             }
+             // 画面の向きを横に固定 (Screen Orientation API がサポートされている場合)
+-            if (screen.orientation) {
+-                screen.orientation.lock('landscape').catch(() => {});
++            if (typeof screen.orientation?.lock === 'function') {
++                try {
++                    screen.orientation.lock('landscape').catch(() => {});
++                } catch {
++                    // 向きの固定が使えない環境でも全画面表示は継続する
++                }
+             }
+         };
+ 
+         // フルスクリーンをキャンセル
+         this.player.fullScreen.cancel = (type?: DPlayerType.FullscreenType) => {
++            // 擬似全画面ではネイティブ API を呼ばず、表示状態だけを戻す
++            if (player_store.is_pseudo_fullscreen) {
++                player_store.is_pseudo_fullscreen = false;
++                player_store.is_fullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
++                return;
++            }
+             // フルスクリーンを終了
+             // Safari は webkit のベンダープレフィックスが必要
+-            document.exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
+-            if (document.exitFullscreen) {
+-                document.exitFullscreen();
++            const exit_fullscreen = document.exitFullscreen || document.webkitExitFullscreen;
++            if (exit_fullscreen && (document.fullscreenElement || document.webkitFullscreenElement)) {
++                Promise.resolve(exit_fullscreen.call(document)).catch(() => {});
+             }
+             // 画面の向きの固定を解除
+-            if (screen.orientation) {
++            if (typeof screen.orientation?.unlock === 'function') {
+                 screen.orientation.unlock();
+             }
+         };
+ 
+         // フルスクリーン状態が変化した時のイベントハンドラーを登録
+-        // 複数のイベントを重複登録しないよう、あえて onfullscreenchange を使う
++        // document 側で検知することで、全画面終了後も状態を同期する
+         const fullscreen_handler = () => {
+-            assert(this.player !== null);
+-            player_store.is_fullscreen = this.player.fullScreen.isFullScreen() === true;
++            player_store.is_fullscreen = player_store.is_pseudo_fullscreen || !!(document.fullscreenElement || document.webkitFullscreenElement);
++        };
++        const escape_handler = (event: KeyboardEvent) => {
++            if (event.key === 'Escape' && player_store.is_pseudo_fullscreen) {
++                player.fullScreen.cancel();
++                event.preventDefault();
++            }
++        };
++        document.addEventListener('fullscreenchange', fullscreen_handler);
++        document.addEventListener('webkitfullscreenchange', fullscreen_handler);
++        document.addEventListener('keydown', escape_handler);
++        this.fullscreen_handler_cleanup = () => {
++            document.removeEventListener('fullscreenchange', fullscreen_handler);
++            document.removeEventListener('webkitfullscreenchange', fullscreen_handler);
++            document.removeEventListener('keydown', escape_handler);
+         };
+-        if (fullscreen_container.onfullscreenchange !== undefined) {
+-            fullscreen_container.onfullscreenchange = fullscreen_handler;
+-        } else if (fullscreen_container.onwebkitfullscreenchange !== undefined) {
+-            fullscreen_container.onwebkitfullscreenchange = fullscreen_handler;
+-        }
+     }
+ 
+ 
+@@ -2062,6 +2099,8 @@ class PlayerController {
+             return;
+         }
+         this.destroying = true;
++        this.fullscreen_handler_cleanup?.();
++        this.fullscreen_handler_cleanup = null;
+ 
+         // 視聴履歴の最終位置を更新
+         // 現在の再生位置を取得するため、プレイヤーの破棄前に実行する必要がある
+diff --git a/client/src/stores/PlayerStore.ts b/client/src/stores/PlayerStore.ts
+index cea72f9..a94820b 100644
+--- a/client/src/stores/PlayerStore.ts
++++ b/client/src/stores/PlayerStore.ts
+@@ -86,6 +86,8 @@ const usePlayerStore = defineStore('player', {
+ 
+         // フルスクリーン状態かどうか
+         is_fullscreen: false,
++        // ブラウザの全画面 API を使わず、字幕・コメントを含むプレイヤーを広げているか
++        is_pseudo_fullscreen: false,
+ 
+         // Document Picture-in-Picture モードかどうか
+         is_document_pip: false,
+@@ -214,6 +216,7 @@ const usePlayerStore = defineStore('player', {
+             this.recorded_program = structuredClone(IRecordedProgramDefault);
+             this.is_virtual_keyboard_display = false;
+             this.is_fullscreen = false;
++            this.is_pseudo_fullscreen = false;
+             this.is_document_pip = false;
+             this.is_control_display = true;
+             this.is_panel_display = (() => {
+diff --git a/client/tests/fullscreen.test.mjs b/client/tests/fullscreen.test.mjs
+new file mode 100644
+index 0000000..2e2fbed
+--- /dev/null
++++ b/client/tests/fullscreen.test.mjs
+@@ -0,0 +1,144 @@
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import test from 'node:test';
++
++import ts from 'typescript';
++
++
++// 実際のプレイヤーメソッドを実行し、DOM/ブラウザ API の有無だけを差し替える。
++const path = process.env.FULLSCREEN_SOURCE ?? new URL('../src/services/player/PlayerController.ts', import.meta.url);
++const source = ts.createSourceFile('PlayerController.ts', fs.readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
++const controller = source.statements.find(node => ts.isClassDeclaration(node) && node.name.text === 'PlayerController');
++const method = controller.members.find(node => node.name?.getText(source) === 'setupFullscreenHandler');
++const code = ts.transpileModule(`class Harness { ${method.getText(source)} }`, {
++    compilerOptions: {target: ts.ScriptTarget.ES2022},
++}).outputText;
++
++function makeHarness() {
++    const document = new EventTarget();
++    document.body = {};
++    document.fullscreenElement = null;
++    const screen = {orientation: {lock: async () => {}, unlock: () => {}}};
++    const store = {is_fullscreen: false, is_pseudo_fullscreen: false};
++    const Harness = new Function('document', 'screen', 'usePlayerStore', 'assert', `${code}; return Harness;`)(
++        document, screen, () => store, assert,
++    );
++    const instance = new Harness();
++    instance.player = {fullScreen: {}, notice: () => {}};
++    instance.destroying = false;
++    instance.destroyed = false;
++    instance.fullscreen_handler_cleanup = null;
++    return {instance, document, store};
++}
++
++test('API がない場合も同じプレイヤーで字幕・コメントを含む表示へ切り替え、再押下で戻る', () => {
++    const {instance, store} = makeHarness();
++    const player = instance.player;
++    instance.setupFullscreenHandler();
++    player.fullScreen.request();
++    assert.equal(instance.player, player);
++    assert.equal(store.is_pseudo_fullscreen, true);
++    assert.equal(player.fullScreen.isFullScreen(), true);
++    player.fullScreen.request();
++    assert.equal(store.is_pseudo_fullscreen, false);
++    assert.equal(store.is_fullscreen, false);
++});
++
++test('標準 API の成功とネイティブ終了を同期し、擬似全画面へ変更しない', async () => {
++    const {instance, document, store} = makeHarness();
++    document.body.requestFullscreen = async () => {
++        document.fullscreenElement = document.body;
++        document.dispatchEvent(new Event('fullscreenchange'));
++    };
++    document.exitFullscreen = async () => {
++        document.fullscreenElement = null;
++        document.dispatchEvent(new Event('fullscreenchange'));
++    };
++    instance.setupFullscreenHandler();
++    instance.player.fullScreen.request();
++    await Promise.resolve();
++    assert.equal(store.is_fullscreen, true);
++    assert.equal(store.is_pseudo_fullscreen, false);
++    instance.player.fullScreen.cancel();
++    assert.equal(store.is_fullscreen, false);
++});
++
++test('webkit 接頭辞の全画面 API も維持する', () => {
++    const {instance, document, store} = makeHarness();
++    document.body.webkitRequestFullscreen = () => {
++        document.webkitFullscreenElement = document.body;
++        document.dispatchEvent(new Event('webkitfullscreenchange'));
++    };
++    document.webkitExitFullscreen = () => {
++        document.webkitFullscreenElement = null;
++        document.dispatchEvent(new Event('webkitfullscreenchange'));
++    };
++    instance.setupFullscreenHandler();
++    instance.player.fullScreen.request();
++    assert.equal(store.is_fullscreen, true);
++    assert.equal(store.is_pseudo_fullscreen, false);
++    instance.player.fullScreen.cancel();
++    assert.equal(store.is_fullscreen, false);
++});
++
++test('API の同期例外を擬似全画面へフォールバックする', () => {
++    const {instance, document, store} = makeHarness();
++    document.body.requestFullscreen = () => { throw new Error('not supported'); };
++    instance.setupFullscreenHandler();
++    instance.player.fullScreen.request();
++    assert.equal(store.is_pseudo_fullscreen, true);
++});
++
++test('API の非同期拒否を擬似全画面へフォールバックする', async () => {
++    const {instance, document, store} = makeHarness();
++    document.body.requestFullscreen = () => Promise.reject(new Error('not permitted'));
++    instance.setupFullscreenHandler();
++    instance.player.fullScreen.request();
++    await Promise.resolve();
++    assert.equal(store.is_pseudo_fullscreen, true);
++});
++
++test('破棄したプレイヤーの非同期拒否で表示を再度切り替えない', async () => {
++    const {instance, document, store} = makeHarness();
++    document.body.requestFullscreen = () => Promise.reject(new Error('not permitted'));
++    instance.setupFullscreenHandler();
++    instance.player.fullScreen.request();
++    instance.player = null;
++    instance.destroyed = true;
++    await Promise.resolve();
++    assert.equal(store.is_pseudo_fullscreen, false);
++});
++
++test('Escape で解除し、イベントの後片付け後は古いプレイヤーを操作しない', () => {
++    const {instance, document, store} = makeHarness();
++    instance.setupFullscreenHandler();
++    instance.player.fullScreen.request();
++    const escape = new Event('keydown', {cancelable: true});
++    Object.defineProperty(escape, 'key', {value: 'Escape'});
++    document.dispatchEvent(escape);
++    assert.equal(store.is_pseudo_fullscreen, false);
++    assert.equal(escape.defaultPrevented, true);
++    instance.fullscreen_handler_cleanup();
++    instance.player.fullScreen.request();
++    document.dispatchEvent(escape);
++    assert.equal(store.is_pseudo_fullscreen, true);
++});
++
++test('再初期化は擬似全画面状態を保持し、イベントを重複登録しない', () => {
++    const {instance, document, store} = makeHarness();
++    let additions = 0;
++    let removals = 0;
++    const add = document.addEventListener.bind(document);
++    const remove = document.removeEventListener.bind(document);
++    document.addEventListener = (...args) => { additions++; add(...args); };
++    document.removeEventListener = (...args) => { removals++; remove(...args); };
++    instance.setupFullscreenHandler();
++    instance.player.fullScreen.request();
++    instance.setupFullscreenHandler();
++    assert.equal(store.is_pseudo_fullscreen, true);
++    assert.equal(additions - removals, 3);
++    instance.player.fullScreen.cancel();
++    assert.equal(store.is_fullscreen, false);
++    instance.fullscreen_handler_cleanup();
++    assert.equal(additions - removals, 0);
++});

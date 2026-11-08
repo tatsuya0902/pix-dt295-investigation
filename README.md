@@ -7,6 +7,7 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 | 対象 | 内容 | 資料 |
 |---|---|---|
 | pix-userland | 約10〜11MBでの受信停止を調査。AES復号処理の改善、転送診断、セッション更新失敗の通知、回帰テスト | [報告](pix-userland/REPORT.md)／[パッチ](pix-userland/fix.patch) |
+| KonomiTV：擬似全画面 | 字幕・コメントを維持してプレイヤー全体を拡大。利用者によるiPhone 17 Pro Max実機確認済み | [報告](konomitv/PSEUDO-FULLSCREEN.md)／[パッチ](konomitv/pseudo-fullscreen.patch)／[一括パッチ](konomitv/combined-fixes.patch) |
 | KonomiTV | 初期データ待ちが10秒を超えると接続が削除される問題を修正。入力待機と出力先の停滞を区別 | [報告](konomitv/REPORT.md)／[パッチ](konomitv/fix.patch) |
 
 両作者向けの報告文とパッチをまとめたZIPは、このリポジトリのReleasesからダウンロードできます。
@@ -23,3 +24,7 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 個別環境で確認した修正候補です。長期連続運用、SIGKILLからの復旧、BS/CS、ブラウザ画面・実スピーカーでの確認は未実施です。元の停止コマンド失敗とファームウェア異常の直接原因には未確定の点があります。メディア端部のデコード警告も残っており、詳細は各報告に記載しています。
 
 パッチの適用基準はpix-userlandの`42364ad24f4fbcac2a611e0992d6f08a1cbd360f`、KonomiTVのv0.14.1です。各プロジェクトへの上流採用は未確認です。
+
+## iPhone向け擬似全画面
+
+字幕・流れるコメントを残した擬似全画面の修正候補を公開しています。利用者によるiPhone 17 Pro Max／iOS 27.2実機確認済み（切り替え・字幕とコメントの維持・解除）。[報告と適用方法](konomitv/PSEUDO-FULLSCREEN.md)を参照してください。擬似全画面の追加ファイルはリポジトリ上で配布し、既存ReleaseのZIPは公開時の内容を保持しています。
