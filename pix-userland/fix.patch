@@ -1,0 +1,800 @@
+diff --git a/.gitignore b/.gitignore
+index 53fc974..1b4bb49 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,6 +4,7 @@
+ *.o
+ *.d
+ /tests/test-crypto
++/tests/test-crypto-mix
+ /tests/test-transport
+ /tests/test-protocol
+ *.ts
+diff --git a/Makefile b/Makefile
+index dffcc15..44637f4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -19,6 +19,8 @@ pix-ts-legacy: $(OBJ)
+ 	$(CC) $(CPPFLAGS) $(USB_CFLAGS) $(CFLAGS) $(WARN) -MMD -MP -c -o $@ $<
+ tests/test-crypto: tests/test_crypto.o src/crypto.o src/platform.o
+ 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(OS_LIBS)
++tests/test-crypto-mix: tests/test_crypto_mix.c src/crypto.c src/platform.c
++	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) $(LDFLAGS) -o $@ tests/test_crypto_mix.c src/platform.c $(OS_LIBS)
+ tests/test-transport: tests/test_transport.o src/crypto.o src/transport.o src/platform.o
+ 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(OS_LIBS)
+ 
+@@ -58,7 +60,7 @@ tests/test-dt295-stream: tests/test_dt295_stream.c src/dt295_stream.c
+ tests/test-ts-output: tests/test_ts_output.c src/ts_output.c
+ 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -DTS_OUTPUT_TESTING $(LDFLAGS) -o $@ $^ $(OS_LIBS)
+ 
+-test: pix-ts-legacy tests/test-dt295-protocol tests/test-dt295-satellite tests/test-dt295-capture tests/test-dt295 tests/test-dt295-routes tests/test-dt295-stream tests/test-ts-output tests/test-crypto tests/test-transport tests/test-diagnostic tests/test-usb-log tests/test-usb-selector tests/test-usb-listing tests/test-compat tests/test-usb-restart tests/test-usb-config-order tests/test-dt295-assets-c
++test: pix-ts-legacy tests/test-dt295-protocol tests/test-dt295-satellite tests/test-dt295-capture tests/test-dt295 tests/test-dt295-routes tests/test-dt295-stream tests/test-ts-output tests/test-crypto tests/test-crypto-mix tests/test-transport tests/test-diagnostic tests/test-usb-log tests/test-usb-selector tests/test-usb-listing tests/test-compat tests/test-usb-restart tests/test-usb-config-order tests/test-dt295-assets-c
+ 	./tests/test-dt295-protocol
+ 	./tests/test-dt295-satellite
+ 	./tests/test-dt295-capture
+@@ -68,6 +70,7 @@ test: pix-ts-legacy tests/test-dt295-protocol tests/test-dt295-satellite tests/t
+ 	./tests/test-dt295-stream
+ 	./tests/test-ts-output
+ 	./tests/test-crypto
++	./tests/test-crypto-mix
+ 	./tests/test-transport
+ 	./tests/test-diagnostic
+ 	./tests/test-usb-log
+@@ -84,5 +87,5 @@ test: pix-ts-legacy tests/test-dt295-protocol tests/test-dt295-satellite tests/t
+ 	$(PYTHON) tests/test_dt295_assets.py
+ 	$(PYTHON) tests/test_firmware_bundle.py
+ clean:
+-	rm -f pix-ts-legacy pix-ts-legacy.exe tests/*.exe src/*.o src/*.d tests/*.o tests/*.d tests/test-crypto tests/test-transport tests/test-diagnostic tests/test-usb-log tests/test-usb-selector tests/test-usb-listing tests/test-compat tests/test-usb-restart tests/test-usb-config-order tests/test-dt295 tests/test-dt295-routes tests/test-dt295-stream tests/test-ts-output tests/test-dt295-capture tests/test-dt295-protocol tests/test-dt295-satellite tests/test-dt295-assets-c
++	rm -f pix-ts-legacy pix-ts-legacy.exe tests/*.exe src/*.o src/*.d tests/*.o tests/*.d tests/test-crypto tests/test-crypto-mix tests/test-transport tests/test-diagnostic tests/test-usb-log tests/test-usb-selector tests/test-usb-listing tests/test-compat tests/test-usb-restart tests/test-usb-config-order tests/test-dt295 tests/test-dt295-routes tests/test-dt295-stream tests/test-ts-output tests/test-dt295-capture tests/test-dt295-protocol tests/test-dt295-satellite tests/test-dt295-assets-c
+ -include $(OBJ:.o=.d) tests/test_crypto.d tests/test_transport.d tests/test_usb_log.d
+diff --git a/core-integration/CMakeLists.txt b/core-integration/CMakeLists.txt
+index 571da0a..1faa2ff 100644
+--- a/core-integration/CMakeLists.txt
++++ b/core-integration/CMakeLists.txt
+@@ -84,6 +84,17 @@ target_compile_options(pix_dt181_composition PRIVATE
+     -Wall -Wextra -Wpedantic -Werror -fno-exceptions -fno-rtti)
+ 
+ enable_testing()
++add_executable(pix_crypto_mix_test
++    "${PIX_SOURCE_DIR}/tests/test_crypto_mix.c"
++    "${PIX_SOURCE_DIR}/src/platform.c")
++target_include_directories(pix_crypto_mix_test PRIVATE "${PIX_SOURCE_DIR}/include")
++target_compile_definitions(pix_crypto_mix_test PRIVATE _POSIX_C_SOURCE=200809L)
++target_compile_options(pix_crypto_mix_test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
++target_link_libraries(pix_crypto_mix_test PRIVATE Threads::Threads)
++if(WIN32)
++    target_link_libraries(pix_crypto_mix_test PRIVATE bcrypt)
++endif()
++add_test(NAME pix_crypto_mix_test COMMAND pix_crypto_mix_test)
+ # These proofs inject pthread mutexes and POSIX processes; Windows uses the
+ # same public runtime USB fixture with its native process harness below.
+ if(NOT WIN32)
+@@ -156,6 +167,7 @@ target_link_options(pix_dt295_adapter_lifecycle_proof PRIVATE
+     -Wl,--wrap=libusb_control_transfer -Wl,--wrap=libusb_bulk_transfer
+     -Wl,--wrap=libusb_interrupt_transfer
+     -Wl,--wrap=dt295_stream_start -Wl,--wrap=dt295_stream_read
++    -Wl,--wrap=dt295_stream_snapshot
+     -Wl,--wrap=dt295_stream_stop -Wl,--wrap=dt295_stream_destroy
+     -Wl,--wrap=random_bytes)
+ add_test(NAME pix_dt295_adapter_lifecycle_proof
+@@ -217,8 +229,9 @@ target_link_options(pix_dt295_acquisition_proof PRIVATE
+     -Wl,--wrap=libusb_interrupt_transfer
+     -Wl,--wrap=random_bytes
+     -Wl,--wrap=dt295_stream_start -Wl,--wrap=dt295_stream_read
++    -Wl,--wrap=dt295_stream_snapshot
+     -Wl,--wrap=dt295_stream_stop -Wl,--wrap=dt295_stream_destroy
+-    -Wl,--wrap=dt295_reprepare_plan
++    -Wl,--wrap=dt295_reprepare_plan -Wl,--wrap=dt295_renew_if_due
+     -Wl,--wrap=dt295_routes_feed -Wl,--wrap=dt295_route_write)
+ add_test(NAME pix_dt295_acquisition_proof
+     COMMAND pix_dt295_acquisition_proof)
+@@ -244,6 +257,7 @@ target_link_options(pix_dt295_scan_contract_proof PRIVATE
+     -Wl,--wrap=libusb_interrupt_transfer
+     -Wl,--wrap=random_bytes
+     -Wl,--wrap=dt295_stream_start -Wl,--wrap=dt295_stream_read
++    -Wl,--wrap=dt295_stream_snapshot
+     -Wl,--wrap=dt295_stream_stop -Wl,--wrap=dt295_stream_destroy
+     -Wl,--wrap=pthread_join -Wl,--wrap=pthread_create
+     -Wl,--wrap=dt295_stop
+@@ -277,6 +291,7 @@ target_link_options(pix_dt295_live_policy_proof PRIVATE
+     -Wl,--wrap=libusb_interrupt_transfer
+     -Wl,--wrap=random_bytes
+     -Wl,--wrap=dt295_stream_start -Wl,--wrap=dt295_stream_read
++    -Wl,--wrap=dt295_stream_snapshot
+     -Wl,--wrap=dt295_stream_stop -Wl,--wrap=dt295_stream_destroy
+     -Wl,--wrap=dt295_route_write)
+ add_test(NAME pix_dt295_live_policy_proof
+@@ -475,6 +490,7 @@ target_link_options(pix_dt295_family_contract_proof PRIVATE
+     -Wl,--wrap=libusb_interrupt_transfer
+     -Wl,--wrap=random_bytes
+     -Wl,--wrap=dt295_stream_start -Wl,--wrap=dt295_stream_read
++    -Wl,--wrap=dt295_stream_snapshot
+     -Wl,--wrap=dt295_stream_stop -Wl,--wrap=dt295_stream_destroy)
+ add_test(NAME pix_dt295_family_contract_proof
+     COMMAND pix_dt295_family_contract_proof)
+diff --git a/core-integration/tests/pix_dt295_family_contract_proof.cpp b/core-integration/tests/pix_dt295_family_contract_proof.cpp
+index 1cc584b..e5f960a 100644
+--- a/core-integration/tests/pix_dt295_family_contract_proof.cpp
++++ b/core-integration/tests/pix_dt295_family_contract_proof.cpp
+@@ -109,6 +109,12 @@ extern "C" int __wrap_random_bytes(void *output, std::size_t length)
+     if (output != nullptr) std::memset(output, 0, length);
+     return 0;
+ }
++/* This fixture substitutes an opaque token for a native stream. */
++extern "C" void __wrap_dt295_stream_snapshot(dt295_stream*, dt295_stream_stats* out)
++{
++    if (out != nullptr) *out = dt295_stream_stats{};
++}
++
+ extern "C" int __wrap_dt295_stream_start(libusb_context *, libusb_device_handle *,
+                                           dt295_stream **stream)
+ {
+diff --git a/pix-dt295-receiver-adapter.cpp b/pix-dt295-receiver-adapter.cpp
+index afe79c8..1ea146b 100644
+--- a/pix-dt295-receiver-adapter.cpp
++++ b/pix-dt295-receiver-adapter.cpp
+@@ -786,14 +786,18 @@ ReceiverAdapter::Result ReceiverAdapter::stop_capture(ReceiverId receiver, Recei
+ 
+ ReceiverAdapter::Result ReceiverAdapter::stop_receiver_unlocked() noexcept
+ {
++    log_stream_state("stop-begin");
+     Result outcome = Result::success();
+     {
+         std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
+         if (device_ != nullptr && dt295_has_session(device_)) {
+             char error[256]{};
+             size_t drained = 0U;
+-            if (dt295_stop(device_, &drained, error, sizeof(error)) != 0)
+-                outcome = Result::failure(Error::USB_IO);
++            const int rc = dt295_stop(device_, &drained, error, sizeof(error));
++            log_stream_state("stop-device", rc);
++            std::fprintf(stderr, "DT295 STOP: receiver=%u rc=%d drained_bytes=%zu detail=%s\n",
++                         static_cast<unsigned>(receiver_), rc, drained, error);
++            if (rc != 0) outcome = Result::failure(Error::USB_IO);
+         }
+     }
+     const auto halted = halt_unlocked();
+@@ -811,8 +815,10 @@ ReceiverAdapter::Result ReceiverAdapter::stop_receiver_unlocked() noexcept
+ ReceiverAdapter::Result ReceiverAdapter::halt_unlocked() noexcept
+ {
+     if (stream_ == nullptr) return Result::success();
++    log_stream_state("halt-begin");
+     int rc = dt295_stream_stop(stream_, 3000U);
+     if (rc == DT295_STREAM_ABANDONED) rc = dt295_stream_stop(stream_, 3000U);
++    log_stream_state("halt-end", rc);
+     if (rc != 0) return Result::failure(Error::USB_IO);
+     if (dt295_stream_destroy(stream_) != 0) return Result::failure(Error::USB_IO);
+     stream_ = nullptr;
+@@ -829,6 +835,8 @@ ReceiverAdapter::Result ReceiverAdapter::start_stream_unlocked() noexcept
+         static_cast<libusb_device_handle*>(usb_native_handle(usb_)), &stream);
+     if (rc != 0 || stream == nullptr) return Result::failure(Error::USB_IO);
+     stream_ = stream;
++    ++stream_generation_;
++    log_stream_state("start");
+     return Result::success();
+ }
+ 
+@@ -950,9 +958,52 @@ void ReceiverAdapter::fail_acquisition(AcquisitionFailure failure,
+             failure == AcquisitionFailure::deadline && error == Error::TIMEOUT,
+             std::memory_order_release);
+     }
++    std::fprintf(stderr,
++                 "DT295 ACQUISITION ERROR: receiver=%u failure=%u terminal=%u error=%u\n",
++                 static_cast<unsigned>(receiver_), static_cast<unsigned>(failure),
++                 static_cast<unsigned>(terminal), static_cast<unsigned>(error));
++    log_stream_state("acquisition-error", static_cast<int>(error));
+     end_session_for_acquisition(terminal);
+ }
+ 
++void ReceiverAdapter::log_stream_state(const char* event, int result) noexcept
++{
++    dt295_stream_stats s{};
++    dt295_stream_snapshot(stream_, &s);
++    std::fprintf(stderr,
++                 "DT295 STREAM: event=%s receiver=%u stream=%llu monotonic_ms=%llu "
++                 "result=%d phase=%u first_error=%d first_error_ns=%llu "
++                 "last_error_status=%lld last_error_actual=%llu "
++                 "submitted=%llu completed=%llu completed_bytes=%llu "
++                 "delivered=%llu delivered_bytes=%llu pending_blocks=%llu "
++                 "peak_pending_blocks=%llu active_transfers=%llu timeouts=%llu "
++                 "last_completion_ns=%llu max_completion_gap_ns=%llu "
++                 "cancellations=%llu late_callbacks=%llu late_actual_bytes=%llu "
++                 "stopping=%d thread_done=%d\n",
++                 event, static_cast<unsigned>(receiver_),
++                 static_cast<unsigned long long>(stream_generation_),
++                 static_cast<unsigned long long>(clock_.monotonic_ms()), result,
++                 static_cast<unsigned>(acquisition_phase_.load(std::memory_order_acquire)),
++                 s.first_error, static_cast<unsigned long long>(s.first_error_ns),
++                 static_cast<long long>(s.last_error_status),
++                 static_cast<unsigned long long>(s.last_error_actual),
++                 static_cast<unsigned long long>(s.submitted),
++                 static_cast<unsigned long long>(s.completed),
++                 static_cast<unsigned long long>(s.completed_bytes),
++                 static_cast<unsigned long long>(s.delivered),
++                 static_cast<unsigned long long>(s.delivered_bytes),
++                 static_cast<unsigned long long>(s.pending_blocks),
++                 static_cast<unsigned long long>(s.peak_pending_blocks),
++                 static_cast<unsigned long long>(s.active_transfers),
++                 static_cast<unsigned long long>(s.timeouts),
++                 static_cast<unsigned long long>(s.last_completion_ns),
++                 static_cast<unsigned long long>(s.max_completion_gap_ns),
++                 static_cast<unsigned long long>(s.cancellations),
++                 static_cast<unsigned long long>(s.late_callbacks),
++                 static_cast<unsigned long long>(s.late_actual_bytes),
++                 s.stopping, s.thread_done);
++}
++
+ void ReceiverAdapter::pump() noexcept
+ {
+     const bool scan_mode = pump_scan_;
+@@ -963,6 +1014,25 @@ void ReceiverAdapter::pump() noexcept
+     publish_buffer.reserve(65536U + 188U);
+     std::uint8_t* chunk = pump_chunk_.data();
+     std::uint64_t last_renew = clock_.monotonic_ms();
++    std::uint64_t last_diagnostic = last_renew;
++    std::uint64_t decoded_packets = 0U;
++    std::uint64_t max_chunk_ms = 0U;
++    const auto log_pump = [&](const char* event) noexcept {
++        log_stream_state(event);
++        std::lock_guard<std::mutex> lock(session_.mutex);
++        std::fprintf(stderr,
++                     "DT295 PUMP: event=%s receiver=%u stream=%llu decoded_packets=%llu "
++                     "max_chunk_ms=%llu residue_bytes=%zu queue_packets=%zu "
++                     "queue_capacity=%zu queue_drops=%llu terminal=%u stop_requested=%d\n",
++                     event, static_cast<unsigned>(receiver_),
++                     static_cast<unsigned long long>(stream_generation_),
++                     static_cast<unsigned long long>(decoded_packets),
++                     static_cast<unsigned long long>(max_chunk_ms), residue.size(),
++                     session_.count, session_.capacity,
++                     static_cast<unsigned long long>(session_.counters.queue_drops),
++                     static_cast<unsigned>(session_.terminal),
++                     pump_stop_.load(std::memory_order_acquire) ? 1 : 0);
++    };
+     const std::uint64_t generation = acquisition_generation_.load(std::memory_order_acquire);
+     const std::uint64_t tune_generation =
+         tune_generation_.load(std::memory_order_acquire);
+@@ -992,11 +1062,17 @@ void ReceiverAdapter::pump() noexcept
+             if (scan_mode) normal_done = true;
+             else break;
+         }
++        const std::uint64_t chunk_started = clock_.monotonic_ms();
++        if (chunk_started - last_diagnostic >= 1000U) {
++            log_pump("progress");
++            last_diagnostic = chunk_started;
++        }
+         std::uint64_t sequence = 0U;
+         std::uint64_t completed_ns = 0U;
+         const int count = dt295_stream_read(stream_, chunk, pump_chunk_.size(), &sequence,
+                                             &completed_ns, 50U);
+         if (count < 0) {
++            log_stream_state("read-error", count);
+             if (count == DT295_STREAM_ABANDONED || count == DT295_STREAM_CLOSED) break;
+             fail_acquisition(AcquisitionFailure::usb,
+                              dtv::userland::detail::StreamTerminal::usb_error,
+@@ -1017,11 +1093,23 @@ void ReceiverAdapter::pump() noexcept
+             offset += 188U;
+             {
+                 std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
+-                if (dt295_decode_packet(device_, packet) < 0) {
++                const int decoded = dt295_decode_packet(device_, packet);
++                if (decoded < 0) {
++                    std::fprintf(stderr,
++                                 "DT295 PACKET ERROR: receiver=%u stream=%llu sequence=%llu "
++                                 "completed_ns=%llu chunk_offset=%zu decoded_packets=%llu "
++                                 "result=%d header=%02x%02x%02x%02x\n",
++                                 static_cast<unsigned>(receiver_),
++                                 static_cast<unsigned long long>(stream_generation_),
++                                 static_cast<unsigned long long>(sequence),
++                                 static_cast<unsigned long long>(completed_ns), offset - 188U,
++                                 static_cast<unsigned long long>(decoded_packets), decoded,
++                                 packet[0], packet[1], packet[2], packet[3]);
+                     decode_failed = true;
+                     break;
+                 }
+             }
++            ++decoded_packets;
+             dt295_routes_feed(routes_, packet);
+             if (scan_mode) scan_append_packet(packet);
+             if (!ready || scan_mode) continue;
+@@ -1217,7 +1305,12 @@ void ReceiverAdapter::pump() noexcept
+                         bool stopped = true;
+                         {
+                             std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
+-                            stopped = dt295_stop(device_, &drained, error, sizeof(error)) == 0;
++                            log_stream_state("rearm-stop-begin");
++                            const int rc = dt295_stop(device_, &drained, error, sizeof(error));
++                            stopped = rc == 0;
++                            log_stream_state("rearm-stop-end", rc);
++                            if (!stopped)
++                                std::fprintf(stderr, "DT295 rearm stop failed: %s\n", error);
+                         }
+                         if (!stopped) {
+                             fail_acquisition(AcquisitionFailure::usb,
+@@ -1365,11 +1458,21 @@ void ReceiverAdapter::pump() noexcept
+             char error[256]{};
+             {
+                 std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
+-                (void)dt295_renew_if_due(device_, &renewed, error, sizeof(error));
++                if (dt295_renew_if_due(device_, &renewed, error, sizeof(error)) != 0) {
++                    std::fprintf(stderr, "DT295 renewal failed: %s\n", error);
++                    fail_acquisition(AcquisitionFailure::usb,
++                                     dtv::userland::detail::StreamTerminal::usb_error,
++                                     Error::USB_IO);
++                    if (scan_mode) scan_terminate(SiEndReason::usb);
++                    break;
++                }
+             }
+             last_renew = now;
+         }
++        const std::uint64_t chunk_ms = clock_.monotonic_ms() - chunk_started;
++        max_chunk_ms = std::max(max_chunk_ms, chunk_ms);
+     }
++    log_pump("exit");
+ }
+ 
+ void* ReceiverAdapter::pump_entry(void* opaque) noexcept
+@@ -1549,8 +1652,11 @@ ReceiverAdapter::Result ReceiverAdapter::shutdown() noexcept
+         if (device_ != nullptr && dt295_has_session(device_)) {
+             char error[256]{};
+             size_t drained = 0U;
+-            if (dt295_stop(device_, &drained, error, sizeof(error)) != 0)
+-                outcome = Result::failure(Error::USB_IO);
++            const int rc = dt295_stop(device_, &drained, error, sizeof(error));
++            log_stream_state("stop-device", rc);
++            std::fprintf(stderr, "DT295 STOP: receiver=%u rc=%d drained_bytes=%zu detail=%s\n",
++                         static_cast<unsigned>(receiver_), rc, drained, error);
++            if (rc != 0) outcome = Result::failure(Error::USB_IO);
+         }
+         if (device_ != nullptr && dt295_has_session(device_)) {
+             char error[256]{};
+diff --git a/pix-dt295-receiver-adapter.h b/pix-dt295-receiver-adapter.h
+index 7006855..1e5324e 100644
+--- a/pix-dt295-receiver-adapter.h
++++ b/pix-dt295-receiver-adapter.h
+@@ -158,6 +158,7 @@ private:
+                                bool live_policy,
+                                const dt295_routes_snapshot* snapshot = nullptr) noexcept;
+     Result ensure_streaming() noexcept;
++    void log_stream_state(const char* event, int result = 0) noexcept;
+     void pump() noexcept;
+     static void* pump_entry(void*) noexcept;
+     Result stop_attached(const Attachment&) noexcept;
+@@ -177,6 +178,7 @@ private:
+     ::dt295* device_ = nullptr;
+     dt295_routes* routes_ = nullptr;
+     dt295_stream* stream_ = nullptr;
++    std::uint64_t stream_generation_ = 0U;
+     dt295_route_plan live_{};
+     dtv::userland::Error init_error_ = dtv::userland::Error::INTERNAL;
+     std::array<char, 256U> init_detail_{};
+diff --git a/src/crypto.c b/src/crypto.c
+index 015c765..65047ae 100644
+--- a/src/crypto.c
++++ b/src/crypto.c
+@@ -83,20 +83,28 @@ static void shift(uint8_t s[16], int inv) {
+             t[r + 4 * c] = s[r + 4 * ((c + (inv ? 4 - r : r)) % 4)];
+     memcpy(s, t, 16);
+ }
++static uint8_t xtime(uint8_t value) {
++    return (uint8_t)((value << 1) ^ ((value & 0x80) ? 0x1b : 0));
++}
+ static void mix(uint8_t s[16], int inv) {
+     for (unsigned i = 0; i < 16; i += 4) {
+         uint8_t a = s[i], b = s[i + 1], c = s[i + 2], d = s[i + 3];
++        /* Inverse MixColumns is forward MixColumns after this linear
++         * preconditioning. Avoid 16 eight-step field multiplies per column:
++         * DT295 decrypts every TS payload on the receive thread. */
+         if (inv) {
+-            s[i] = mul(a, 14) ^ mul(b, 11) ^ mul(c, 13) ^ mul(d, 9);
+-            s[i + 1] = mul(a, 9) ^ mul(b, 14) ^ mul(c, 11) ^ mul(d, 13);
+-            s[i + 2] = mul(a, 13) ^ mul(b, 9) ^ mul(c, 14) ^ mul(d, 11);
+-            s[i + 3] = mul(a, 11) ^ mul(b, 13) ^ mul(c, 9) ^ mul(d, 14);
+-        } else {
+-            s[i] = mul(a, 2) ^ mul(b, 3) ^ c ^ d;
+-            s[i + 1] = a ^ mul(b, 2) ^ mul(c, 3) ^ d;
+-            s[i + 2] = a ^ b ^ mul(c, 2) ^ mul(d, 3);
+-            s[i + 3] = mul(a, 3) ^ b ^ c ^ mul(d, 2);
++            const uint8_t ac = xtime(xtime(a ^ c));
++            const uint8_t bd = xtime(xtime(b ^ d));
++            a ^= ac;
++            c ^= ac;
++            b ^= bd;
++            d ^= bd;
+         }
++        const uint8_t all = a ^ b ^ c ^ d;
++        s[i] = a ^ all ^ xtime(a ^ b);
++        s[i + 1] = b ^ all ^ xtime(b ^ c);
++        s[i + 2] = c ^ all ^ xtime(c ^ d);
++        s[i + 3] = d ^ all ^ xtime(d ^ a);
+     }
+ }
+ void aes_encrypt(const aes128 *a, const uint8_t in[16], uint8_t out[16]) {
+diff --git a/src/dt295_stream.c b/src/dt295_stream.c
+index 62aae04..4db6325 100644
+--- a/src/dt295_stream.c
++++ b/src/dt295_stream.c
+@@ -3,6 +3,8 @@
+ 
+ #include <errno.h>
+ #include <stdlib.h>
++#include <stdio.h>
++#include <inttypes.h>
+ #include <string.h>
+ #include <time.h>
+ 
+@@ -75,12 +77,22 @@ static uint64_t monotonic_ns(void) {
+         return 0;
+     return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
+ }
+-static void first_error_locked(dt295_stream *s, int error, int status, int actual) {
++static void first_error_locked(dt295_stream *s, int error, int status, int actual,
++                               const char *cause) {
+     if (!s->stats.first_error) {
+         s->stats.first_error = error;
+         s->stats.first_error_ns = monotonic_ns();
+         s->stats.last_error_status = (uint64_t)(int64_t)status;
+         s->stats.last_error_actual = actual > 0 ? (uint64_t)actual : 0;
++        fprintf(stderr,
++                "DT295 STREAM ERROR: cause=%s first_error=%d status=%d actual=%d "
++                "first_error_ns=%" PRIu64 " completed_bytes=%" PRIu64
++                " delivered_bytes=%" PRIu64 " pending_blocks=%" PRIu64
++                " peak_pending_blocks=%" PRIu64 " active_transfers=%u timeouts=%" PRIu64 "\n",
++                cause, error, status, actual, s->stats.first_error_ns,
++                s->stats.completed_bytes, s->stats.delivered_bytes,
++                s->next_submit - s->next_read, s->stats.peak_pending_blocks,
++                s->active, s->stats.timeouts);
+     }
+     s->stopping = 1;
+     s->stats.stopping = 1;
+@@ -107,7 +119,7 @@ static int submit_locked(struct dt295_slot *slot) {
+     if (s->stopping)
+         return s->stats.first_error ? s->stats.first_error : DT295_STREAM_CLOSED;
+     if (s->next_submit - s->next_read >= s->ring_blocks) {
+-        first_error_locked(s, LIBUSB_ERROR_NO_MEM, -1, 0);
++        first_error_locked(s, LIBUSB_ERROR_NO_MEM, -1, 0, "ring-full");
+         return LIBUSB_ERROR_NO_MEM;
+     }
+     slot->sequence = s->next_submit++;
+@@ -123,7 +135,7 @@ static int submit_locked(struct dt295_slot *slot) {
+         --s->active;
+         s->stats.active_transfers = s->active;
+         --s->next_submit;
+-        first_error_locked(s, rc, -1, 0);
++        first_error_locked(s, rc, -1, 0, "submit");
+         return rc;
+     }
+     ++s->stats.submitted;
+@@ -138,7 +150,8 @@ static void LIBUSB_CALL transfer_complete(struct libusb_transfer *transfer) {
+         ++s->stats.late_callbacks;
+         if (transfer->actual_length > 0 && transfer->actual_length <= DT295_STREAM_TRANSFER_BYTES)
+             s->stats.late_actual_bytes += (uint64_t)transfer->actual_length;
+-        first_error_locked(s, LIBUSB_ERROR_OTHER, transfer->status, transfer->actual_length);
++        first_error_locked(s, LIBUSB_ERROR_OTHER, transfer->status, transfer->actual_length,
++                           "unexpected-callback");
+         pthread_mutex_unlock(&s->mutex);
+         return;
+     }
+@@ -159,13 +172,14 @@ static void LIBUSB_CALL transfer_complete(struct libusb_transfer *transfer) {
+     }
+     int length = transfer->actual_length;
+     if (length < 0 || length > DT295_STREAM_TRANSFER_BYTES) {
+-        first_error_locked(s, LIBUSB_ERROR_OVERFLOW, transfer->status, length);
++        first_error_locked(s, LIBUSB_ERROR_OVERFLOW, transfer->status, length, "invalid-length");
+         pthread_mutex_unlock(&s->mutex);
+         return;
+     }
+     if (transfer->status != LIBUSB_TRANSFER_COMPLETED &&
+         transfer->status != LIBUSB_TRANSFER_TIMED_OUT) {
+-        first_error_locked(s, status_to_error(transfer->status), transfer->status, length);
++        first_error_locked(s, status_to_error(transfer->status), transfer->status, length,
++                           "transfer");
+         pthread_mutex_unlock(&s->mutex);
+         return;
+     }
+@@ -174,7 +188,7 @@ static void LIBUSB_CALL transfer_complete(struct libusb_transfer *transfer) {
+     uint64_t seq = slot->sequence;
+     struct dt295_block *block = &s->blocks[seq % s->ring_blocks];
+     if (block->ready) {
+-        first_error_locked(s, LIBUSB_ERROR_NO_MEM, transfer->status, length);
++        first_error_locked(s, LIBUSB_ERROR_NO_MEM, transfer->status, length, "ring-slot-busy");
+         pthread_mutex_unlock(&s->mutex);
+         return;
+     }
+@@ -209,7 +223,7 @@ static void *event_main(void *argument) {
+                 if (s->slots[i].active) {
+                     int rc = libusb_cancel_transfer(s->slots[i].transfer);
+                     if (rc && rc != LIBUSB_ERROR_NOT_FOUND && !s->stats.first_error)
+-                        first_error_locked(s, rc, -1, 0);
++                        first_error_locked(s, rc, -1, 0, "cancel");
+                 }
+             }
+         }
+@@ -221,7 +235,7 @@ static void *event_main(void *argument) {
+         int rc = libusb_handle_events_timeout_completed(s->context, &timeout, NULL);
+         if (rc < 0 && rc != LIBUSB_ERROR_INTERRUPTED) {
+             pthread_mutex_lock(&s->mutex);
+-            first_error_locked(s, rc, -1, 0);
++            first_error_locked(s, rc, -1, 0, "event-loop");
+             pthread_mutex_unlock(&s->mutex);
+         }
+     }
+diff --git a/tests/pix_dt295_acquisition_proof.cpp b/tests/pix_dt295_acquisition_proof.cpp
+index 6df43a4..4b23c16 100644
+--- a/tests/pix_dt295_acquisition_proof.cpp
++++ b/tests/pix_dt295_acquisition_proof.cpp
+@@ -32,6 +32,7 @@ void dt295_actual_fixture_recording_packet(uint8_t packet[188], unsigned continu
+ void dt295_actual_fixture_encrypt(uint8_t packet[188]);
+ int __real_dt295_reprepare_plan(dt295 *, const dt295_route_plan *, char *, std::size_t);
+ int __real_dt295_routes_feed(dt295_routes *, const uint8_t packet[188]);
++int __real_dt295_renew_if_due(dt295 *, int *, char *, std::size_t);
+ int __real_dt295_route_write(dt295 *, const dt295_route_op *, char *, std::size_t);
+ }
+ 
+@@ -53,6 +54,9 @@ std::atomic<bool> g_use_mode{false};
+ std::atomic<bool> g_release_split{false};
+ std::atomic<bool> g_split_pat_sent{false};
+ std::atomic<int> g_read_fail{0};
++std::atomic<unsigned> g_read_calls{0U};
++std::atomic<bool> g_renew_fail{false};
++std::atomic<unsigned> g_renew_failures{0U};
+ std::atomic<int> g_start_fail{0};
+ std::atomic<int> g_reprepare_fail{0};
+ std::atomic<bool> g_arm_restart_block{false};
+@@ -145,6 +149,9 @@ void reset_stream(int mode)
+     g_release_split.store(false, std::memory_order_release);
+     g_split_pat_sent.store(false, std::memory_order_release);
+     g_read_fail.store(0, std::memory_order_release);
++    g_read_calls.store(0U, std::memory_order_release);
++    g_renew_fail.store(false, std::memory_order_release);
++    g_renew_failures.store(0U, std::memory_order_release);
+     g_start_fail.store(0, std::memory_order_release);
+     g_reprepare_fail.store(0, std::memory_order_release);
+     g_arm_restart_block.store(false, std::memory_order_release);
+@@ -1028,6 +1035,49 @@ int case_reprepare_failure(const std::vector<std::uint8_t> &assets)
+     return 0;
+ }
+ 
++int case_renewal_failure(const std::vector<std::uint8_t> &assets, bool scan)
++{
++    reset_stream(5);  // No packets; exercise renewal even while input is idle.
++    Rig rig(assets);
++    CHECK(rig.adapter.ready());
++    CHECK_RESULT(rig.adapter.open(0U), "renewal open");
++    CHECK_RESULT(rig.adapter.program_hz(0U, ReceiverSystem::terrestrial, 473142857ULL, 1000U),
++                 "renewal tune");
++    const Attachment attachment = attachment_for(30U);
++    pix::capture::dt295::ReceiverAdapter::ScanLease lease{};
++    if (scan) {
++        CHECK_RESULT(rig.adapter.begin_scan(&lease), "renewal scan");
++    } else {
++        CHECK_RESULT(rig.adapter.start_capture(0U, ReceiverSystem::terrestrial), "renewal start");
++        CHECK_RESULT(rig.adapter.attach(attachment), "renewal attach");
++    }
++    for (unsigned attempt = 0U; attempt < 3000U && g_read_calls.load() == 0U; ++attempt)
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    CHECK(g_read_calls.load() != 0U);
++    g_renew_fail.store(true, std::memory_order_release);
++    rig.clock.advance(1001U);
++    if (scan) {
++        CHECK(wait_phase(rig.adapter, Phase::terminal));
++        CHECK(rig.adapter.acquisition().failure == Failure::usb);
++        std::uint8_t buffer[188]{};
++        pix::capture::dt295::ReceiverAdapter::SiReadResult result{};
++        CHECK_RESULT(rig.adapter.read_scan(lease, {buffer, sizeof(buffer)},
++                     std::chrono::milliseconds(100), &result), "renewal scan read");
++        CHECK(result.terminal && result.reason ==
++              pix::capture::dt295::ReceiverAdapter::SiEndReason::usb);
++        CHECK_RESULT(rig.adapter.end_scan(lease), "renewal scan end");
++    } else {
++        CHECK(expect_terminal(rig.adapter, attachment, Failure::usb,
++                              static_cast<std::uint8_t>(
++                                  dtv::userland::detail::StreamTerminal::usb_error)));
++        CHECK_RESULT(rig.adapter.detach(attachment), "renewal detach");
++    }
++    CHECK(g_renew_failures.load() == 1U);
++    CHECK_RESULT(rig.adapter.stop_capture(0U, ReceiverSystem::terrestrial), "renewal stop");
++    CHECK_RESULT(rig.adapter.close(0U), "renewal close");
++    return 0;
++}
++
+ int case_read_failure(const std::vector<std::uint8_t> &assets)
+ {
+     reset_stream(5);
+@@ -1389,6 +1439,12 @@ extern "C" int __wrap_random_bytes(void *output, std::size_t length)
+     return 0;
+ }
+ 
++/* This fixture substitutes an opaque token for a native stream. */
++extern "C" void __wrap_dt295_stream_snapshot(dt295_stream*, dt295_stream_stats* out)
++{
++    if (out != nullptr) *out = dt295_stream_stats{};
++}
++
+ extern "C" int __wrap_dt295_stream_start(libusb_context *, libusb_device_handle *,
+                                           dt295_stream **stream)
+ {
+@@ -1415,6 +1471,7 @@ extern "C" int __wrap_dt295_stream_read(dt295_stream *, void *buffer, std::size_
+                                          std::uint64_t *sequence, std::uint64_t *completed_ns,
+                                          unsigned)
+ {
++    g_read_calls.fetch_add(1U, std::memory_order_acq_rel);
+     if (buffer == nullptr || capacity < 188U) return 0;
+     if (g_read_fail.load(std::memory_order_acquire) > 0) {
+         g_read_fail.fetch_sub(1, std::memory_order_acq_rel);
+@@ -1644,6 +1701,19 @@ extern "C" int __wrap_dt295_stream_destroy(dt295_stream *)
+     return 0;
+ }
+ 
++extern "C" int __wrap_dt295_renew_if_due(dt295* device, int* renewed,
++                                        char* error, std::size_t size)
++{
++    if (g_renew_fail.exchange(false, std::memory_order_acq_rel)) {
++        g_renew_failures.fetch_add(1U, std::memory_order_acq_rel);
++        if (renewed != nullptr) *renewed = 0;
++        if (error != nullptr && size != 0U)
++            std::snprintf(error, size, "synthetic renewal failure");
++        return -1;
++    }
++    return __real_dt295_renew_if_due(device, renewed, error, size);
++}
++
+ extern "C" int __wrap_dt295_reprepare_plan(dt295 *device, const dt295_route_plan *plan,
+                                             char *error, std::size_t error_size)
+ {
+@@ -1757,6 +1827,8 @@ int main(int argc, char **argv)
+                                 dtv::userland::detail::StreamTerminal::bridge_fatal), true);
+     }));
+     CHECK(run("reprepare", [&] { return case_reprepare_failure(assets); }));
++    CHECK(run("renewal-failure", [&] { return case_renewal_failure(assets, false); }));
++    CHECK(run("scan-renewal-failure", [&] { return case_renewal_failure(assets, true); }));
+     CHECK(run("read-failure", [&] { return case_read_failure(assets); }));
+     CHECK(run("terminal-race", [&] { return case_terminal_detach_race(assets); }));
+     CHECK(run("slow-stop", [&] { return case_slow_consumer_terminal(assets, false); }));
+diff --git a/tests/pix_dt295_adapter_lifecycle_proof.cpp b/tests/pix_dt295_adapter_lifecycle_proof.cpp
+index a044e70..72e82b7 100644
+--- a/tests/pix_dt295_adapter_lifecycle_proof.cpp
++++ b/tests/pix_dt295_adapter_lifecycle_proof.cpp
+@@ -178,6 +178,12 @@ extern "C" int __wrap_libusb_interrupt_transfer(libusb_device_handle*, unsigned
+     return dt295_actual_fixture_interrupt(endpoint, data, length, actual);
+ }
+ 
++/* This fixture substitutes an opaque token for a native stream. */
++extern "C" void __wrap_dt295_stream_snapshot(dt295_stream*, dt295_stream_stats* out)
++{
++    if (out != nullptr) *out = dt295_stream_stats{};
++}
++
+ extern "C" int __wrap_dt295_stream_start(libusb_context*, libusb_device_handle*,
+                                           dt295_stream** stream)
+ {
+diff --git a/tests/pix_dt295_live_policy_proof.cpp b/tests/pix_dt295_live_policy_proof.cpp
+index 5c9dc3c..d00af80 100644
+--- a/tests/pix_dt295_live_policy_proof.cpp
++++ b/tests/pix_dt295_live_policy_proof.cpp
+@@ -444,6 +444,12 @@ extern "C" int __wrap_dt295_route_write(dt295 *device, const dt295_route_op *op,
+     return __real_dt295_route_write(device, op, error, error_size);
+ }
+ 
++/* This fixture substitutes an opaque token for a native stream. */
++extern "C" void __wrap_dt295_stream_snapshot(dt295_stream*, dt295_stream_stats* out)
++{
++    if (out != nullptr) *out = dt295_stream_stats{};
++}
++
+ extern "C" int __wrap_dt295_stream_start(libusb_context *, libusb_device_handle *,
+                                           dt295_stream **stream)
+ {
+diff --git a/tests/pix_dt295_scan_contract_proof.cpp b/tests/pix_dt295_scan_contract_proof.cpp
+index fcbed7f..d4b6188 100644
+--- a/tests/pix_dt295_scan_contract_proof.cpp
++++ b/tests/pix_dt295_scan_contract_proof.cpp
+@@ -995,6 +995,12 @@ extern "C" int __wrap_random_bytes(void *output, std::size_t length)
+     return 0;
+ }
+ 
++/* This fixture substitutes an opaque token for a native stream. */
++extern "C" void __wrap_dt295_stream_snapshot(dt295_stream*, dt295_stream_stats* out)
++{
++    if (out != nullptr) *out = dt295_stream_stats{};
++}
++
+ extern "C" int __wrap_dt295_stream_start(libusb_context *, libusb_device_handle *,
+                                           dt295_stream **stream)
+ {
+diff --git a/tests/test_crypto_mix.c b/tests/test_crypto_mix.c
+new file mode 100644
+index 0000000..f9174ad
+--- /dev/null
++++ b/tests/test_crypto_mix.c
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/* Verify the optimized AES column transform against its field definition. */
++#include "../src/crypto.c"
++#include <assert.h>
++#include <stdio.h>
++
++static uint8_t reference_multiply(uint8_t value, unsigned factor) {
++    unsigned result = 0, polynomial = value;
++    while (factor) {
++        if (factor & 1U) result ^= polynomial;
++        polynomial <<= 1;
++        if (polynomial & 0x100U) polynomial ^= 0x11bU;
++        factor >>= 1;
++    }
++    return (uint8_t)result;
++}
++static void check_column_transform(const uint8_t input[16], int inverse) {
++    static const unsigned coefficients[2][4] = {{2, 3, 1, 1}, {14, 11, 13, 9}};
++    uint8_t actual[16], expected[16] = {0};
++    memcpy(actual, input, sizeof(actual));
++    for (unsigned column = 0; column < 4; ++column)
++        for (unsigned row = 0; row < 4; ++row)
++            for (unsigned k = 0; k < 4; ++k)
++                expected[4 * column + row] ^=
++                    reference_multiply(input[4 * column + k],
++                                       coefficients[inverse][(k + 4 - row) % 4]);
++    mix(actual, inverse);
++    assert(memcmp(actual, expected, sizeof(actual)) == 0);
++}
++int main(void) {
++    uint8_t input[16] = {0};
++    /* Both transforms are linear over GF(2). Check every byte value at each
++     * position, then combinations with deterministic synthetic data. */
++    for (unsigned position = 0; position < 16; ++position)
++        for (unsigned value = 0; value < 256; ++value) {
++            memset(input, 0, sizeof(input));
++            input[position] = (uint8_t)value;
++            check_column_transform(input, 0);
++            check_column_transform(input, 1);
++        }
++    uint32_t state = 0x12345678U;
++    for (unsigned sample = 0; sample < 4096; ++sample) {
++        for (unsigned i = 0; i < sizeof(input); ++i) {
++            state ^= state << 13;
++            state ^= state >> 17;
++            state ^= state << 5;
++            input[i] = (uint8_t)state;
++        }
++        check_column_transform(input, 0);
++        check_column_transform(input, 1);
++    }
++    puts("AES MixColumns/InvMixColumns: 16384 field-reference comparisons passed");
++    return 0;
++}
+diff --git a/tests/test_dt295_stream.c b/tests/test_dt295_stream.c
+index 6c841fb..4024758 100644
+--- a/tests/test_dt295_stream.c
++++ b/tests/test_dt295_stream.c
+@@ -77,6 +77,23 @@ int main(void) {
+     }
+     dispose(s);
+ 
++    /* Reuse a small ring for 128 MiB: there is no byte-count stop threshold.
++     * A consumer that keeps up must keep submitting past many ring wraps. */
++    s = make(8);
++    for (unsigned i = 0; i < 2048; ++i) {
++        assert(!complete(s, i % 2, LIBUSB_TRANSFER_COMPLETED,
++                         DT295_STREAM_TRANSFER_BYTES, (unsigned char)i));
++        assert(dt295_stream_read(s, buffer, sizeof(buffer), &seq, &when, 0) ==
++               DT295_STREAM_TRANSFER_BYTES);
++        assert(seq == i && buffer[0] == (unsigned char)i &&
++               buffer[sizeof(buffer) - 1] == (unsigned char)i);
++    }
++    dt295_stream_snapshot(s, &stats);
++    assert(stats.first_error == 0 && stats.peak_pending_blocks == 3 &&
++           stats.completed_bytes == 128ULL * 1024 * 1024 &&
++           stats.delivered_bytes == stats.completed_bytes && stats.pending_blocks == 2);
++    dispose(s);
++
+     /* An unjoined event owner keeps transfer storage alive after stop deadlines. */
+     s = make(8);
+     assert(dt295_stream_destroy(s) == DT295_STREAM_ABANDONED);
+@@ -91,7 +108,7 @@ int main(void) {
+     assert(dt295_stream_destroy(s) == 0);
+ 
+     puts("DT295 synthetic stream cases passed: order, partial timeout, error prefix, bounded ring, "
+-         "first error, late-byte accounting, stop deadline ownership");
++         "first error, 128 MiB ring reuse, late-byte accounting, stop deadline ownership");
+     return 0;
+ }
+ #endif
