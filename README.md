@@ -12,6 +12,8 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 | KonomiTV：録画再生の強化 | 録画中番組の追いかけ再生と、シークボタン・再生速度コントロールを追加 | [報告](konomitv/PLAYBACK.md)／[追いかけ再生パッチ](konomitv/chase-playback.patch)／[シーク・速度パッチ](konomitv/seek-controls.patch)／[一括パッチ](konomitv/playback-combined.patch) |
 | KonomiTV：EPGStation/Jellyfin 連携 | 削除をEPGStationへ委譲（確認フロー付き）、保護状態の表示（ログアウト中も）・付け外し、Jellyfinへの削除連動と同期リトライ | [報告](konomitv/EPGSTATION-INTEGRATION.md)／[パッチ](konomitv/epgstation-integration.patch) |
 
+この環境で使っている周辺ソフトウェアの独自機能の一覧は、[独自機能一覧（ソフトウェア編）](CUSTOM-FEATURES.md)にまとめています。
+
 両作者向けの報告文とパッチをまとめたZIPは、このリポジトリのReleasesからダウンロードできます。
 
 ## 確認できたこと
