@@ -7,13 +7,13 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 | 対象 | 内容 | 資料 |
 |---|---|---|
 | pix-userland | 約10〜11MBでの受信停止を調査。AES復号処理の改善、転送診断、セッション更新失敗の通知、回帰テスト | [報告](pix-userland/REPORT.md)／[パッチ](pix-userland/fix.patch) |
-| KonomiTV：擬似全画面 | 字幕・コメントを維持してプレイヤー全体を拡大。利用者によるiPhone 17 Pro Max実機確認済み | [報告](konomitv/PSEUDO-FULLSCREEN.md)／[パッチ](konomitv/pseudo-fullscreen.patch)／[一括パッチ](konomitv/combined-fixes.patch) |
-| KonomiTV | 初期データ待ちが10秒を超えると接続が削除される問題を修正。入力待機と出力先の停滞を区別 | [報告](konomitv/REPORT.md)／[パッチ](konomitv/fix.patch) |
-| KonomiTV：録画再生の強化 | 録画中番組の追いかけ再生と、シークボタン・再生速度コントロールを追加 | [報告](konomitv/PLAYBACK.md)／[追いかけ再生パッチ](konomitv/chase-playback.patch)／[シーク・速度パッチ](konomitv/seek-controls.patch)／[一括パッチ](konomitv/playback-combined.patch) |
-| KonomiTV：EPGStation/Jellyfin 連携 | 削除をEPGStationへ委譲（確認フロー付き）、保護状態の表示（ログアウト中も）・付け外し、Jellyfinへの削除連動と同期リトライ | [報告](konomitv/EPGSTATION-INTEGRATION.md)／[パッチ](konomitv/epgstation-integration.patch) |
-| KonomiTV：レコーダー系表示機能 | 前の話・次の話ボタン、場面一覧、コメントの盛り上がり表示とダイジェスト再生、追いかけ再生のカード修正 | [報告](konomitv/RECORDER-FEATURES.md)／[次話パッチ](konomitv/episode-nav.patch)／[場面一覧パッチ](konomitv/chapters.patch)／[盛り上がりパッチ](konomitv/excitement.patch) |
+| KonomiTV：擬似全画面 | 字幕・コメントを維持してプレイヤー全体を拡大。利用者によるiPhone 17 Pro Max実機確認済み | [報告](https://github.com/tatsuya0902/konomitv-customizations/blob/main/PSEUDO-FULLSCREEN.md)／[パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/pseudo-fullscreen.patch)／[一括パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/combined-fixes.patch) |
+| KonomiTV | 初期データ待ちが10秒を超えると接続が削除される問題を修正。入力待機と出力先の停滞を区別 | [報告](https://github.com/tatsuya0902/konomitv-customizations/blob/main/REPORT.md)／[パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/fix.patch) |
+| KonomiTV：録画再生の強化 | 録画中番組の追いかけ再生と、シークボタン・再生速度コントロールを追加 | [報告](https://github.com/tatsuya0902/konomitv-customizations/blob/main/PLAYBACK.md)／[追いかけ再生パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/chase-playback.patch)／[シーク・速度パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/seek-controls.patch)／[一括パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/playback-combined.patch) |
+| KonomiTV：EPGStation/Jellyfin 連携 | 削除をEPGStationへ委譲（確認フロー付き）、保護状態の表示（ログアウト中も）・付け外し、Jellyfinへの削除連動と同期リトライ | [報告](https://github.com/tatsuya0902/konomitv-customizations/blob/main/EPGSTATION-INTEGRATION.md)／[パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/epgstation-integration.patch) |
+| KonomiTV：レコーダー系表示機能 | 前の話・次の話ボタン、場面一覧、コメントの盛り上がり表示とダイジェスト再生、追いかけ再生のカード修正 | [報告](https://github.com/tatsuya0902/konomitv-customizations/blob/main/RECORDER-FEATURES.md)／[次話パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/episode-nav.patch)／[場面一覧パッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/chapters.patch)／[盛り上がりパッチ](https://github.com/tatsuya0902/konomitv-customizations/blob/main/excitement.patch) |
 
-この環境で使っている周辺ソフトウェアの独自機能の一覧は、[独自機能一覧（ソフトウェア編）](CUSTOM-FEATURES.md)にまとめています。
+この環境で使っている周辺ソフトウェアの独自機能の一覧は、[独自機能一覧（ソフトウェア編）](https://github.com/tatsuya0902/konomitv-customizations/blob/main/CUSTOM-FEATURES.md)にまとめています。
 
 両作者向けの報告文とパッチをまとめたZIPは、このリポジトリのReleasesからダウンロードできます。
 
@@ -32,8 +32,8 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 
 ## iPhone向け擬似全画面
 
-字幕・流れるコメントを残した擬似全画面の修正候補を公開しています。利用者によるiPhone 17 Pro Max／iOS 27.2実機確認済み（切り替え・字幕とコメントの維持・解除）。[報告と適用方法](konomitv/PSEUDO-FULLSCREEN.md)を参照してください。擬似全画面の追加ファイルはリポジトリ上で配布し、既存ReleaseのZIPは公開時の内容を保持しています。
+字幕・流れるコメントを残した擬似全画面の修正候補を公開しています。利用者によるiPhone 17 Pro Max／iOS 27.2実機確認済み（切り替え・字幕とコメントの維持・解除）。[報告と適用方法](https://github.com/tatsuya0902/konomitv-customizations/blob/main/PSEUDO-FULLSCREEN.md)を参照してください。擬似全画面の追加ファイルはリポジトリ上で配布し、既存ReleaseのZIPは公開時の内容を保持しています。
 
 ## KonomiTVの録画再生の強化
 
-録画中番組の追いかけ再生と、シークボタン・再生速度コントロールの変更候補を公開しています。パッチの適用基準はKonomiTV v0.14.1です。自環境では本番反映済みですが、iPhone／Android TVの実機での操作確認は未実施です。[報告と適用方法](konomitv/PLAYBACK.md)を参照してください。
+録画中番組の追いかけ再生と、シークボタン・再生速度コントロールの変更候補を公開しています。パッチの適用基準はKonomiTV v0.14.1です。自環境では本番反映済みですが、iPhone／Android TVの実機での操作確認は未実施です。[報告と適用方法](https://github.com/tatsuya0902/konomitv-customizations/blob/main/PLAYBACK.md)を参照してください。
