@@ -2,6 +2,8 @@
 
 このリポジトリの本題である PIX-DT295 受信停止の調査とは別に、同じ録画環境（pix-userland ＋ Mirakurun ＋ EPGStation ＋ KonomiTV）で使っている周辺ソフトウェアの独自機能をまとめた索引です。各機能の詳細と適用方法は、リンク先の報告を参照してください。
 
+KonomiTV への改造の全記録（未公開分を含む。アップデート時や再構築時の復元用）は [LOCAL-CUSTOMIZATIONS.md](konomitv/LOCAL-CUSTOMIZATIONS.md) にまとめています。
+
 ## KonomiTV（適用基準：v0.14.1）
 
 | 機能 | 概要 | 状態 |
