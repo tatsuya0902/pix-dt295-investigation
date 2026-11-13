@@ -1,0 +1,581 @@
+commit 38e2b3c2a775bb3c4f375c0f8d23e7f735afba55
+Author: KonomiTV local mods <local@konomi.tv>
+Date:   Fri Nov 13 08:31:24 2026 +0900
+
+    feat: chase playback for in-progress recordings
+    
+    Server:
+    - Extract MetadataAnalyzer TS duration logic into shared
+      app.utils.TSInformation.calculateTSFileDuration (PCR timestamps,
+      zero-fill aware); MetadataAnalyzer delegates to it (no behavior change)
+    - VideoStream tracks recording state + playable duration per session;
+      refreshRecordingDuration() re-measures the growing TS via PCR
+      (throttled 10s, 3s safety margin at the live edge, read-only)
+    - getVirtualPlaylist builds/extends virtual segments up to the
+      playable duration without touching built segments; while recording
+      it returns an EVENT playlist with no ENDLIST, switching to
+      VOD+ENDLIST when the recording completes
+    - VideoStreamsRouter refreshes the duration from the freshly loaded
+      program on each playlist request
+    
+    Client:
+    - Recorded program cards for status=Recording are now openable
+      (chase playback from the start) and the badge reads
+      録画中・追いかけ再生
+    
+    Verified with a simulated growing TS file (unit test): duration
+    45.5s -> 81.8s tracked, segments 5 -> 14 extended, completion flips
+    to VOD+ENDLIST, completed recordings unchanged.
+
+diff --git a/client/src/components/Videos/RecordedProgram.vue b/client/src/components/Videos/RecordedProgram.vue
+index ab799fe..04a8a51 100644
+--- a/client/src/components/Videos/RecordedProgram.vue
++++ b/client/src/components/Videos/RecordedProgram.vue
+@@ -1,6 +1,6 @@
+ <template>
+     <router-link v-ripple class="recorded-program"
+-        :to="program.recorded_video.status === 'Recorded' ? `/videos/watch/${program.id}` : { path: '' }"
++        :to="program.recorded_video.status === 'Recorded' || program.recorded_video.status === 'Recording' ? `/videos/watch/${program.id}` : { path: '' }"
+         :class="{
+             'recorded-program--recording': program.recorded_video.status === 'Recording',
+             'recorded-program--failed': program.recorded_video.status === 'AnalysisFailed',
+@@ -16,7 +16,7 @@
+                 <div class="recorded-program__thumbnail-duration">{{ProgramUtils.getProgramDuration(program)}}</div>
+                 <div v-if="program.recorded_video.status === 'Recording'" class="recorded-program__thumbnail-status recorded-program__thumbnail-status--recording">
+                     <div class="recorded-program__thumbnail-status-dot"></div>
+-                    録画中
++                    録画中・追いかけ再生
+                 </div>
+                 <div v-else-if="program.recorded_video.status === 'AnalysisFailed'" class="recorded-program__thumbnail-status recorded-program__thumbnail-status--failed">
+                     <Icon icon="fluent:error-circle-12-regular" width="15px" height="15px" />
+diff --git a/server/app/metadata/MetadataAnalyzer.py b/server/app/metadata/MetadataAnalyzer.py
+index 394c6b1..3a33789 100644
+--- a/server/app/metadata/MetadataAnalyzer.py
++++ b/server/app/metadata/MetadataAnalyzer.py
+@@ -16,7 +16,7 @@ from app.config import Config, LoadConfig
+ from app.constants import JST, LIBRARY_PATH
+ from app.metadata.TSInfoAnalyzer import TSInfoAnalyzer
+ from app.utils import ClosestMultiple
+-from app.utils.TSInformation import TSInformation
++from app.utils.TSInformation import TSInformation, calculateTSFileDuration
+ from app.utils.TSKeyFrameSeeker import TSKeyFrameSeeker, TSStreamInfo
+ 
+ 
+@@ -685,134 +685,10 @@ class MetadataAnalyzer:
+ 
+     def __calculateTSFileDuration(self, search_block_size: int = 1024 * 1024) -> tuple[float, int] | None:
+         """
+-        TS ファイル内の最初と最後の有効な PCR タイムスタンプから再生時間（秒）を算出する (written with o3-mini)
+-        FFprobe から再生時間を取得できなかった場合のフォールバックとして利用する
+-        録画ファイルは録画時にスパースファイル（ゼロ埋めされた領域を含む）となる可能性があるため、
+-        ファイル末尾はゼロ埋め領域を高速に検出し、実際にデータが存在する部分と区別している
+-
+-        Args:
+-            search_block_size (int): PCR 抽出時に読み込むブロックサイズ (バイト単位). デフォルト: 1MB
+-
+-        Returns:
+-            tuple[float, int] | None: (再生時間（秒）, 有効な TS データの終了位置) のタプル
+-                （抽出できなかった場合は None を返す）
++        TS ファイル内の最初と最後の有効な PCR タイムスタンプから再生時間（秒）を算出する
++        実装は app.utils.TSInformation.calculateTSFileDuration に共通化されている (録画中の追いかけ再生でも利用する)
+         """
+-
+-        try:
+-            # ファイルサイズを取得
+-            file_size = self.recorded_file_path.stat().st_size
+-
+-            with self.recorded_file_path.open('rb') as f:
+-                # --- 先頭ブロックからの PCR 抽出 ---
+-                # 基本的にはファイル先頭の最初の TS パケットから PCR を取得する
+-                f.seek(0)
+-                head_data = f.read(search_block_size)
+-                # 先頭ブロックが TS 同期バイト (0x47) で始まっていない場合、1バイトずつ探索して
+-                # 最初の同期バイトの位置を特定する
+-                if head_data and head_data[0] != ts.SYNC_BYTE[0]:
+-                    logging.info('Head data is not aligned; searching for sync byte...')
+-                    corrected_offset = None
+-                    for idx in range(len(head_data)):
+-                        if head_data[idx] == ts.SYNC_BYTE[0]:
+-                            corrected_offset = idx
+-                            break
+-                    if corrected_offset is not None:
+-                        head_data = head_data[corrected_offset:]
+-                    else:
+-                        logging.error('Failed to find sync byte in head data.')
+-                        return None
+-
+-                first_timestamp: float | None = None
+-                for i in range(0, len(head_data), ts.PACKET_SIZE):
+-                    packet = head_data[i : i + ts.PACKET_SIZE]
+-                    if len(packet) < ts.PACKET_SIZE:
+-                        break
+-                    if packet[0] != ts.SYNC_BYTE[0]:
+-                        continue
+-                    pcr_val = ts.pcr(packet)
+-                    if pcr_val is not None:
+-                        # PCR 値を ts.HZ (90000Hz) で割り、秒単位に変換する
+-                        first_timestamp = pcr_val / ts.HZ
+-                        break
+-
+-                if first_timestamp is None:
+-                    logging.error('Failed to extract first PCR timestamp.')
+-                    return None
+-
+-                # --- 末尾のゼロ埋め領域の境界をバイナリサーチで検出 ---
+-                # TS ファイルは録画後にゼロ埋め領域が存在する場合があるため、
+-                # 正常なデータが存在する最後のオフセット (valid_data_end) を求める
+-                block_check_size = 4096  # ゼロ埋め判定用の小ブロックサイズ (4KB)
+-                low = 0
+-                high = file_size
+-                zero_boundary = file_size  # もしゼロブロックが見つからなければ有効データはファイル全体とする
+-
+-                while low <= high:
+-                    mid = (low + high) // 2
+-                    f.seek(mid)
+-                    candidate = f.read(block_check_size)
+-                    if candidate and all(byte == 0 for byte in candidate):
+-                        # candidate が全て 0x00 ならば、ゼロ埋め領域の一部と見なし、境界を mid に更新
+-                        zero_boundary = mid
+-                        high = mid - 1
+-                    else:
+-                        low = mid + 1
+-
+-                # valid_data_end はゼロ埋めが始まる境界、つまり有効データの終了位置
+-                valid_data_end = zero_boundary if zero_boundary < file_size else file_size
+-
+-                # --- 末尾領域から最後の有効な PCR の取得 ---
+-                # 有効データ領域の終端から search_block_size 分の範囲を読み込み、TS パケット単位で同期を取る
+-                start_offset = valid_data_end - search_block_size
+-                if start_offset < 0:
+-                    start_offset = 0
+-                # TS パケット境界に合わせるため、start_offset を ts.PACKET_SIZE の倍数に補正
+-                start_offset = (start_offset // ts.PACKET_SIZE) * ts.PACKET_SIZE
+-                f.seek(start_offset)
+-                tail_chunk = f.read(valid_data_end - start_offset)
+-
+-                # --- TS パケット同期の調整 ---
+-                # 読み込んだ tail_chunk の先頭が TS 同期バイト (0x47) でない場合、同期位置を調整する
+-                offset_in_chunk = 0
+-                if tail_chunk and tail_chunk[0] != ts.SYNC_BYTE[0]:
+-                    for idx in range(len(tail_chunk)):
+-                        if tail_chunk[idx] == ts.SYNC_BYTE[0]:
+-                            offset_in_chunk = idx
+-                            break
+-
+-                # --- tail_chunk 内の TS パケットから有効な PCR 値を収集 ---
+-                valid_pcrs: list[float] = []
+-                for j in range(offset_in_chunk, len(tail_chunk) - ts.PACKET_SIZE + 1, ts.PACKET_SIZE):
+-                    packet = tail_chunk[j : j + ts.PACKET_SIZE]
+-                    if packet[0] != ts.SYNC_BYTE[0]:
+-                        continue
+-                    pcr_val = ts.pcr(packet)
+-                    if pcr_val is not None:
+-                        valid_pcrs.append(pcr_val / ts.HZ)
+-
+-                if not valid_pcrs:
+-                    logging.error('Failed to extract last PCR in tail region.')
+-                    return None
+-
+-                last_timestamp = valid_pcrs[-1]
+-
+-                # --- PCR ラップアラウンドの補正 ---
+-                # もし末尾の PCR が先頭の PCR より小さい場合は、PCR のラップアラウンドが発生しているとみなし、
+-                # PCR の最大値に相当する秒数を加算する
+-                if last_timestamp < first_timestamp:
+-                    PCR_MAX_SECONDS = ts.PCR_CYCLE / ts.HZ
+-                    last_timestamp += PCR_MAX_SECONDS
+-
+-                # --- 再生時間の算出 ---
+-                # 先頭と末尾の PCR 値から再生時間（秒）を算出する
+-                duration = last_timestamp - first_timestamp
+-                logging.debug(f'{self.recorded_file_path}: Duration calculated: {duration} seconds.')
+-
+-                return (duration, valid_data_end)
+-
+-        except Exception as ex:
+-            logging.error('Error in fallback duration calculation:', exc_info=ex)
+-            return None
++        return calculateTSFileDuration(self.recorded_file_path, search_block_size)
+ 
+ 
+     def __detectTSVideoStreamChanges(self, end_ts_offset: int | None) -> bool:
+diff --git a/server/app/routers/VideoStreamsRouter.py b/server/app/routers/VideoStreamsRouter.py
+index f2f6ec9..eb0c3d6 100644
+--- a/server/app/routers/VideoStreamsRouter.py
++++ b/server/app/routers/VideoStreamsRouter.py
+@@ -87,6 +87,10 @@ async def VideoHLSPlaylistAPI(
+         is_new_session_allowed = True,
+     )
+ 
++    # ローカル改造: 追いかけ再生のために、録画中の再生可能尺を最新の状態に更新する
++    # recorded_program はこのリクエストで DB から再取得された最新の状態
++    await video_stream.refreshRecordingDuration(recorded_program)
++
+     # 仮想 HLS M3U8 プレイリストを取得
+     virtual_playlist = video_stream.getVirtualPlaylist(cache_key)
+     return Response(
+diff --git a/server/app/streams/VideoStream.py b/server/app/streams/VideoStream.py
+index a7ccfdc..9a7d4c1 100644
+--- a/server/app/streams/VideoStream.py
++++ b/server/app/streams/VideoStream.py
+@@ -29,6 +29,7 @@ from app.streams.VideoEncodingTask import VideoEncodingTask
+ from app.streams.VideoSegmentPlanner import VideoSegmentPlanner
+ from app.utils import SetTimeout
+ from app.utils.MP4KeyFrameParser import MP4KeyFrameParser
++from app.utils.TSInformation import calculateTSFileDuration
+ from app.utils.TSKeyFrameSeeker import TSKeyFrameSeeker, TSStreamInfo
+ 
+ 
+@@ -98,6 +99,11 @@ class VideoStream:
+     ## DB 書き込みを HLS セグメントごとに発生させず、再生済み範囲をある程度まとめて保存する
+     SEGMENT_MAP_SAVE_BATCH_SIZE: ClassVar[int] = 16
+ 
++    # ローカル改造: 追いかけ再生で録画中の再生可能尺を再計測する最小間隔 (秒)
++    RECORDING_REFRESH_INTERVAL_SECONDS: ClassVar[float] = 10.0
++    # ローカル改造: 追いかけ再生で、書き込み途中の末尾を避けるために再生可能尺から差し引く安全マージン (秒)
++    RECORDING_EDGE_SAFETY_SECONDS: ClassVar[float] = 3.0
++
+     # 録画視聴セッションのインスタンスが入る、セッション ID をキーとした辞書
+     # この辞書に録画視聴セッションに関する全てのデータが格納されている
+     __instances: ClassVar[dict[str, VideoStream]] = {}
+@@ -156,6 +162,12 @@ class VideoStream:
+             # HLS セグメントを格納するリスト
+             instance._segments = []
+ 
++            # ローカル改造: 追いかけ再生用に、録画中かどうかと現在の再生可能尺 (秒) を保持する
++            # 再生可能尺は refreshRecordingDuration() で TS の PCR タイムスタンプから実測して更新される
++            instance._is_recording = recorded_program.recorded_video.status == 'Recording'
++            instance._playable_duration_seconds = recorded_program.recorded_video.duration
++            instance._recording_state_updated_at = 0.0
++
+             # segment_map はシーケンス番号で参照するため、視聴セッション内では辞書として保持する
+             ## DB には JSON 配列のまま保存し、検索時だけ辞書化することで保存形式を増やさずに参照コストを下げる
+             instance._segment_map_by_sequence = {
+@@ -255,6 +267,9 @@ class VideoStream:
+         self.encoding_options: StreamEncodingOptions
+         self._segment_duration_seconds: float
+         self._segments: list[VideoStreamSegment]
++        self._is_recording: bool
++        self._playable_duration_seconds: float
++        self._recording_state_updated_at: float
+         self._segment_map_by_sequence: dict[int, SegmentMapEntry]
+         self._ts_stream_info: TSStreamInfo | None
+         self._ts_source_base_dts: int | None
+@@ -408,42 +423,124 @@ class VideoStream:
+             return (0, 0)
+ 
+ 
+-    def getVirtualPlaylist(self, cache_key: str | None = None) -> str:
++    async def refreshRecordingDuration(self, fresh_recorded_program: RecordedProgram) -> None:
+         """
+-        仮想 HLS M3U8 プレイリストを取得する
+-        返却時点では仮想 HLS M3U8 プレイリストに記載されているセグメントのデータは存在せず (「仮想」のゆえん)、随時エンコードされる
++        ローカル改造: 追いかけ再生のために、録画中の再生可能尺を最新の状態に更新する
++        プレイリスト API が呼ばれるたびに最新の RecordedProgram (DB から再取得済み) を渡される前提で、
++        録画中ファイルについては TS の PCR タイムスタンプから実際の再生可能尺を実測する
++        (ファイルサイズからの単純比例では推定しない)。計測は最大で
++        RECORDING_REFRESH_INTERVAL_SECONDS に 1 回まで間引かれる。
++        録画が完了していた場合は最終的な尺に更新し、以降は通常の VOD として扱う。
+ 
+         Args:
+-            cache_key (str | None): キャッシュ制御用のキー (None の場合は新しいキーを生成する)
++            fresh_recorded_program (RecordedProgram): DB から再取得した最新の録画番組情報
++        """
+ 
+-        Returns:
+-            str: 仮想 HLS M3U8 プレイリスト
++        # 録画中でないセッションでは何もしない (録画中だったセッションの完了検知のため、
++        # セッション開始時点で録画中だった場合のみ継続して確認する)
++        if self._is_recording is False and fresh_recorded_program.recorded_video.status != 'Recording':
++            return
++
++        # 計測の間引き
++        now = time.monotonic()
++        if now - self._recording_state_updated_at < VideoStream.RECORDING_REFRESH_INTERVAL_SECONDS:
++            return
++        self._recording_state_updated_at = now
++
++        fresh_video = fresh_recorded_program.recorded_video
++        if fresh_video.status == 'Recording':
++            self._is_recording = True
++            if fresh_video.container_format == 'MPEG-TS':
++                # TS の先頭・末尾の PCR から実測する (読み取り専用。録画ファイルは変更しない)
++                result = await asyncio.to_thread(calculateTSFileDuration, Path(fresh_video.file_path))
++                if result is not None:
++                    # 書き込み途中の末尾は不安定なため、安全マージンを引いた位置までを再生可能とする
++                    playable = max(0.0, result[0] - VideoStream.RECORDING_EDGE_SAFETY_SECONDS)
++                    if playable > self._playable_duration_seconds:
++                        self._playable_duration_seconds = playable
++                        logging.info(f'{self.log_prefix} Chase playback duration updated. [playable: {playable:.1f}s]')
++                elif fresh_video.duration > self._playable_duration_seconds:
++                    # 実測に失敗した場合は DB 上の尺 (登録時点のスナップショット) を下限として使う
++                    self._playable_duration_seconds = fresh_video.duration
++            elif fresh_video.duration > self._playable_duration_seconds:
++                self._playable_duration_seconds = fresh_video.duration
++        else:
++            # 録画が完了したため、最終的な尺に更新して通常の VOD として扱う
++            if self._is_recording:
++                logging.info(f'{self.log_prefix} Recording finished. Switching chase playback to VOD.')
++            self._is_recording = False
++            self._playable_duration_seconds = fresh_video.duration
++
++
++    def _buildSegmentsUpTo(self, duration_seconds: float) -> None:
+         """
++        ローカル改造: 仮想 HLS セグメントを指定された再生可能尺まで構築・延長する
++        既に構築済みのセグメントには一切手を付けず、末尾に不足分だけを追加する
++        (構築済みセグメントの尺やエンコード状態を変更しないため、再生中のセッションでも安全に延長できる)
+ 
+-        # セッションのアクティブ状態を維持する
+-        self.keepAlive()
++        Args:
++            duration_seconds (float): 再生可能尺 (秒)
++        """
+ 
+-        # まだ HLS セグメントリストが空なら、録画時間とフレームレートから仮想セグメントを作成する
+         if len(self._segments) == 0:
+-            segment_count = max(1, math.ceil(self.recorded_program.recorded_video.duration / self._segment_duration_seconds))
++            # 初回構築 (従来の処理と同一)
++            segment_count = max(1, math.ceil(duration_seconds / self._segment_duration_seconds))
+             for segment_sequence in range(segment_count):
+                 playlist_start_seconds = segment_sequence * self._segment_duration_seconds
+-                remaining_duration = self.recorded_program.recorded_video.duration - playlist_start_seconds
+-                duration_seconds = min(self._segment_duration_seconds, max(remaining_duration, 0.001))
++                remaining_duration = duration_seconds - playlist_start_seconds
++                segment_duration = min(self._segment_duration_seconds, max(remaining_duration, 0.001))
+                 self._segments.append(VideoStreamSegment(
+                     sequence_index = segment_sequence,
+                     playlist_start_seconds = playlist_start_seconds,
+                     source_file_position = None,
+                     source_start_dts = None,
+-                    duration_seconds = duration_seconds,
++                    duration_seconds = segment_duration,
+                     encode_status = 'Pending',
+                     encoded_segment_ts_future = asyncio.Future(),
+                 ))
+-
+             logging.info(
+                 f'{self.log_prefix} Total {len(self._segments)} virtual segments '
+                 f'(segment_duration: {self._segment_duration_seconds:.6f}s).'
+             )
++            return
++
++        # 延長: 最終セグメントの終端から、再生可能尺に達するまでセグメントを追加する
++        last_segment = self._segments[-1]
++        next_start_seconds = last_segment.playlist_start_seconds + last_segment.duration_seconds
++        next_sequence = last_segment.sequence_index + 1
++        while next_start_seconds < duration_seconds - 0.001:
++            segment_duration = min(self._segment_duration_seconds, max(duration_seconds - next_start_seconds, 0.001))
++            self._segments.append(VideoStreamSegment(
++                sequence_index = next_sequence,
++                playlist_start_seconds = next_start_seconds,
++                source_file_position = None,
++                source_start_dts = None,
++                duration_seconds = segment_duration,
++                encode_status = 'Pending',
++                encoded_segment_ts_future = asyncio.Future(),
++            ))
++            next_start_seconds += segment_duration
++            next_sequence += 1
++
++
++    def getVirtualPlaylist(self, cache_key: str | None = None) -> str:
++        """
++        仮想 HLS M3U8 プレイリストを取得する
++        返却時点では仮想 HLS M3U8 プレイリストに記載されているセグメントのデータは存在せず (「仮想」のゆえん)、随時エンコードされる
++
++        Args:
++            cache_key (str | None): キャッシュ制御用のキー (None の場合は新しいキーを生成する)
++
++        Returns:
++            str: 仮想 HLS M3U8 プレイリスト
++        """
++
++        # セッションのアクティブ状態を維持する
++        self.keepAlive()
++
++        # 仮想 HLS セグメントを現在の再生可能尺まで構築・延長する
++        # ローカル改造: 録画中は再生可能尺が伸びていくため、プレイリスト取得のたびに延長を確認する
++        self._buildSegmentsUpTo(self._playable_duration_seconds)
+ 
+         # キャッシュキーが指定されていない場合は UUID の - で区切って一番左側のみを使う
+         if cache_key is None:
+@@ -453,7 +550,11 @@ class VideoStream:
+         virtual_playlist = ''
+         virtual_playlist += '#EXTM3U\n'
+         virtual_playlist += '#EXT-X-VERSION:6\n'
+-        virtual_playlist += '#EXT-X-PLAYLIST-TYPE:VOD\n'
++        # ローカル改造: 録画中は EVENT プレイリストとして返し、録画先端への追随 (プレイリスト再取得) を促す
++        if self._is_recording:
++            virtual_playlist += '#EXT-X-PLAYLIST-TYPE:EVENT\n'
++        else:
++            virtual_playlist += '#EXT-X-PLAYLIST-TYPE:VOD\n'
+ 
+         # HLS セグメントの実時間の最大値を指定する (小数点以下は切り上げ)
+         target_duration = max(s.duration_seconds for s in self._segments)
+@@ -466,7 +567,9 @@ class VideoStream:
+             # キャッシュ避けのためにキャッシュキーを付与する
+             virtual_playlist += f'segment?session_id={self.session_id}&sequence={segment.sequence_index}&cache_key={cache_key}\n'
+ 
+-        virtual_playlist += '#EXT-X-ENDLIST\n'
++        # ローカル改造: 録画中は ENDLIST を付けない (続きのセグメントが増えるため)
++        if self._is_recording is False:
++            virtual_playlist += '#EXT-X-ENDLIST\n'
+         return virtual_playlist
+ 
+ 
+diff --git a/server/app/utils/TSInformation.py b/server/app/utils/TSInformation.py
+index 6d3362a..1be057c 100644
+--- a/server/app/utils/TSInformation.py
++++ b/server/app/utils/TSInformation.py
+@@ -1,9 +1,12 @@
+ 
++import logging
+ import multiprocessing
+ import re
++from pathlib import Path
+ from typing import ClassVar, Literal, cast
+ 
+ from ariblib.aribstr import AribString
++from biim.mpeg2ts import ts
+ from tortoise import Tortoise, connections
+ from tortoise.exceptions import ConfigurationError
+ from tortoise.expressions import Q
+@@ -700,3 +703,137 @@ for _region_name, _region_ids in TSInformation.TERRESTRIAL_REGION_TO_REGION_IDS.
+         if _region_id not in TSInformation.REGION_ID_TO_REGION_NAMES:
+             TSInformation.REGION_ID_TO_REGION_NAMES[_region_id] = []
+         TSInformation.REGION_ID_TO_REGION_NAMES[_region_id].append(_region_name)
++
++
++# ***** TS ファイルの再生時間算出 *****
++
++def calculateTSFileDuration(file_path: Path, search_block_size: int = 1024 * 1024) -> tuple[float, int] | None:
++    """
++    TS ファイル内の最初と最後の有効な PCR タイムスタンプから再生時間（秒）を算出する (written with o3-mini)
++    FFprobe から再生時間を取得できなかった場合のフォールバックとして利用する
++    録画ファイルは録画時にスパースファイル（ゼロ埋めされた領域を含む）となる可能性があるため、
++    ファイル末尾はゼロ埋め領域を高速に検出し、実際にデータが存在する部分と区別している
++
++    Args:
++        search_block_size (int): PCR 抽出時に読み込むブロックサイズ (バイト単位). デフォルト: 1MB
++
++    Returns:
++        tuple[float, int] | None: (再生時間（秒）, 有効な TS データの終了位置) のタプル
++            （抽出できなかった場合は None を返す）
++    """
++
++    try:
++        # ファイルサイズを取得
++        file_size = file_path.stat().st_size
++
++        with file_path.open('rb') as f:
++            # --- 先頭ブロックからの PCR 抽出 ---
++            # 基本的にはファイル先頭の最初の TS パケットから PCR を取得する
++            f.seek(0)
++            head_data = f.read(search_block_size)
++            # 先頭ブロックが TS 同期バイト (0x47) で始まっていない場合、1バイトずつ探索して
++            # 最初の同期バイトの位置を特定する
++            if head_data and head_data[0] != ts.SYNC_BYTE[0]:
++                logging.info('Head data is not aligned; searching for sync byte...')
++                corrected_offset = None
++                for idx in range(len(head_data)):
++                    if head_data[idx] == ts.SYNC_BYTE[0]:
++                        corrected_offset = idx
++                        break
++                if corrected_offset is not None:
++                    head_data = head_data[corrected_offset:]
++                else:
++                    logging.error('Failed to find sync byte in head data.')
++                    return None
++
++            first_timestamp: float | None = None
++            for i in range(0, len(head_data), ts.PACKET_SIZE):
++                packet = head_data[i : i + ts.PACKET_SIZE]
++                if len(packet) < ts.PACKET_SIZE:
++                    break
++                if packet[0] != ts.SYNC_BYTE[0]:
++                    continue
++                pcr_val = ts.pcr(packet)
++                if pcr_val is not None:
++                    # PCR 値を ts.HZ (90000Hz) で割り、秒単位に変換する
++                    first_timestamp = pcr_val / ts.HZ
++                    break
++
++            if first_timestamp is None:
++                logging.error('Failed to extract first PCR timestamp.')
++                return None
++
++            # --- 末尾のゼロ埋め領域の境界をバイナリサーチで検出 ---
++            # TS ファイルは録画後にゼロ埋め領域が存在する場合があるため、
++            # 正常なデータが存在する最後のオフセット (valid_data_end) を求める
++            block_check_size = 4096  # ゼロ埋め判定用の小ブロックサイズ (4KB)
++            low = 0
++            high = file_size
++            zero_boundary = file_size  # もしゼロブロックが見つからなければ有効データはファイル全体とする
++
++            while low <= high:
++                mid = (low + high) // 2
++                f.seek(mid)
++                candidate = f.read(block_check_size)
++                if candidate and all(byte == 0 for byte in candidate):
++                    # candidate が全て 0x00 ならば、ゼロ埋め領域の一部と見なし、境界を mid に更新
++                    zero_boundary = mid
++                    high = mid - 1
++                else:
++                    low = mid + 1
++
++            # valid_data_end はゼロ埋めが始まる境界、つまり有効データの終了位置
++            valid_data_end = zero_boundary if zero_boundary < file_size else file_size
++
++            # --- 末尾領域から最後の有効な PCR の取得 ---
++            # 有効データ領域の終端から search_block_size 分の範囲を読み込み、TS パケット単位で同期を取る
++            start_offset = valid_data_end - search_block_size
++            if start_offset < 0:
++                start_offset = 0
++            # TS パケット境界に合わせるため、start_offset を ts.PACKET_SIZE の倍数に補正
++            start_offset = (start_offset // ts.PACKET_SIZE) * ts.PACKET_SIZE
++            f.seek(start_offset)
++            tail_chunk = f.read(valid_data_end - start_offset)
++
++            # --- TS パケット同期の調整 ---
++            # 読み込んだ tail_chunk の先頭が TS 同期バイト (0x47) でない場合、同期位置を調整する
++            offset_in_chunk = 0
++            if tail_chunk and tail_chunk[0] != ts.SYNC_BYTE[0]:
++                for idx in range(len(tail_chunk)):
++                    if tail_chunk[idx] == ts.SYNC_BYTE[0]:
++                        offset_in_chunk = idx
++                        break
++
++            # --- tail_chunk 内の TS パケットから有効な PCR 値を収集 ---
++            valid_pcrs: list[float] = []
++            for j in range(offset_in_chunk, len(tail_chunk) - ts.PACKET_SIZE + 1, ts.PACKET_SIZE):
++                packet = tail_chunk[j : j + ts.PACKET_SIZE]
++                if packet[0] != ts.SYNC_BYTE[0]:
++                    continue
++                pcr_val = ts.pcr(packet)
++                if pcr_val is not None:
++                    valid_pcrs.append(pcr_val / ts.HZ)
++
++            if not valid_pcrs:
++                logging.error('Failed to extract last PCR in tail region.')
++                return None
++
++            last_timestamp = valid_pcrs[-1]
++
++            # --- PCR ラップアラウンドの補正 ---
++            # もし末尾の PCR が先頭の PCR より小さい場合は、PCR のラップアラウンドが発生しているとみなし、
++            # PCR の最大値に相当する秒数を加算する
++            if last_timestamp < first_timestamp:
++                PCR_MAX_SECONDS = ts.PCR_CYCLE / ts.HZ
++                last_timestamp += PCR_MAX_SECONDS
++
++            # --- 再生時間の算出 ---
++            # 先頭と末尾の PCR 値から再生時間（秒）を算出する
++            duration = last_timestamp - first_timestamp
++            logging.debug(f'{file_path}: Duration calculated: {duration} seconds.')
++
++            return (duration, valid_data_end)
++
++    except Exception as ex:
++        logging.error('Error in fallback duration calculation:', exc_info=ex)
++        return None

@@ -9,6 +9,7 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 | pix-userland | 約10〜11MBでの受信停止を調査。AES復号処理の改善、転送診断、セッション更新失敗の通知、回帰テスト | [報告](pix-userland/REPORT.md)／[パッチ](pix-userland/fix.patch) |
 | KonomiTV：擬似全画面 | 字幕・コメントを維持してプレイヤー全体を拡大。利用者によるiPhone 17 Pro Max実機確認済み | [報告](konomitv/PSEUDO-FULLSCREEN.md)／[パッチ](konomitv/pseudo-fullscreen.patch)／[一括パッチ](konomitv/combined-fixes.patch) |
 | KonomiTV | 初期データ待ちが10秒を超えると接続が削除される問題を修正。入力待機と出力先の停滞を区別 | [報告](konomitv/REPORT.md)／[パッチ](konomitv/fix.patch) |
+| KonomiTV：録画再生の強化 | 録画中番組の追いかけ再生と、シークボタン・再生速度コントロールを追加 | [報告](konomitv/PLAYBACK.md)／[追いかけ再生パッチ](konomitv/chase-playback.patch)／[シーク・速度パッチ](konomitv/seek-controls.patch)／[一括パッチ](konomitv/playback-combined.patch) |
 
 両作者向けの報告文とパッチをまとめたZIPは、このリポジトリのReleasesからダウンロードできます。
 
@@ -28,3 +29,7 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 ## iPhone向け擬似全画面
 
 字幕・流れるコメントを残した擬似全画面の修正候補を公開しています。利用者によるiPhone 17 Pro Max／iOS 27.2実機確認済み（切り替え・字幕とコメントの維持・解除）。[報告と適用方法](konomitv/PSEUDO-FULLSCREEN.md)を参照してください。擬似全画面の追加ファイルはリポジトリ上で配布し、既存ReleaseのZIPは公開時の内容を保持しています。
+
+## KonomiTVの録画再生の強化
+
+録画中番組の追いかけ再生と、シークボタン・再生速度コントロールの変更候補を公開しています。パッチの適用基準はKonomiTV v0.14.1です。自環境では本番反映済みですが、iPhone／Android TVの実機での操作確認は未実施です。[報告と適用方法](konomitv/PLAYBACK.md)を参照してください。
