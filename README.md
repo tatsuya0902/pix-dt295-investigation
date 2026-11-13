@@ -10,6 +10,7 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 | KonomiTV：擬似全画面 | 字幕・コメントを維持してプレイヤー全体を拡大。利用者によるiPhone 17 Pro Max実機確認済み | [報告](konomitv/PSEUDO-FULLSCREEN.md)／[パッチ](konomitv/pseudo-fullscreen.patch)／[一括パッチ](konomitv/combined-fixes.patch) |
 | KonomiTV | 初期データ待ちが10秒を超えると接続が削除される問題を修正。入力待機と出力先の停滞を区別 | [報告](konomitv/REPORT.md)／[パッチ](konomitv/fix.patch) |
 | KonomiTV：録画再生の強化 | 録画中番組の追いかけ再生と、シークボタン・再生速度コントロールを追加 | [報告](konomitv/PLAYBACK.md)／[追いかけ再生パッチ](konomitv/chase-playback.patch)／[シーク・速度パッチ](konomitv/seek-controls.patch)／[一括パッチ](konomitv/playback-combined.patch) |
+| KonomiTV：EPGStation/Jellyfin 連携 | 削除をEPGStationへ委譲（確認フロー付き）、保護状態の表示（ログアウト中も）・付け外し、Jellyfinへの削除連動と同期リトライ | [報告](konomitv/EPGSTATION-INTEGRATION.md)／[パッチ](konomitv/epgstation-integration.patch) |
 
 両作者向けの報告文とパッチをまとめたZIPは、このリポジトリのReleasesからダウンロードできます。
 

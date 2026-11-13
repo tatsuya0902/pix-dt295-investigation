@@ -1,0 +1,1331 @@
+diff --git a/client/src/components/Videos/RecordedProgram.vue b/client/src/components/Videos/RecordedProgram.vue
+index bbd1791..a776413 100644
+--- a/client/src/components/Videos/RecordedProgram.vue
++++ b/client/src/components/Videos/RecordedProgram.vue
+@@ -9,6 +9,10 @@
+             <div class="recorded-program__thumbnail">
+                 <img class="recorded-program__thumbnail-image" loading="lazy" decoding="async"
+                     :src="`${Utils.api_base_url}/videos/${program.id}/thumbnail`">
++                <div v-if="isProtected" class="recorded-program__protection" title="この録画は削除から保護されています" aria-label="削除保護中">
++                    <Icon icon="fluent:lock-closed-16-filled" width="14px" height="14px" />
++                    <span>保護中</span>
++                </div>
+                 <div class="recorded-program__thumbnail-duration">{{ProgramUtils.getProgramDuration(program)}}</div>
+                 <div v-if="program.recorded_video.status === 'Recording'" class="recorded-program__thumbnail-status recorded-program__thumbnail-status--recording">
+                     <div class="recorded-program__thumbnail-status-dot"></div>
+@@ -72,7 +76,7 @@
+                 </svg>
+             </div>
+             <div class="recorded-program__menu">
+-                <v-menu location="bottom end" :close-on-content-click="true">
++                <v-menu v-model="menuOpen" location="bottom end" :close-on-content-click="true">
+                     <template v-slot:activator="{ props }">
+                         <div v-ripple class="recorded-program__menu-button"
+                             v-bind="props"
+@@ -111,7 +115,14 @@
+                             <v-list-item-title class="ml-3">サムネイルを再生成</v-list-item-title>
+                         </v-list-item>
+                         <v-divider></v-divider>
+-                        <v-list-item @click="showDeleteConfirmation" :disabled="program.recorded_video.status === 'Recording'" class="recorded-program__menu-list-item--danger">
++                        <v-list-item v-if="useUserStore().user?.is_admin" @click="toggleProtection"
++                            :disabled="protectionBusy || !protection?.enabled || program.recorded_video.status === 'Recording'">
++                            <template v-slot:prepend>
++                                <Icon :icon="protection?.is_protected ? 'fluent:lock-closed-24-regular' : 'fluent:lock-open-24-regular'" width="20px" height="20px" />
++                            </template>
++                            <v-list-item-title class="ml-3">{{ protectionBusy ? '保護状態を確認中…' : protection?.is_protected ? '録画の保護を解除' : '録画を保護する' }}</v-list-item-title>
++                        </v-list-item>
++                        <v-list-item @click="showDeleteConfirmation" :disabled="program.recorded_video.status === 'Recording' || protectionBusy || protection?.is_protected === true || isProtected" class="recorded-program__menu-list-item--danger">
+                             <template v-slot:prepend>
+                                 <Icon icon="fluent:delete-24-regular" width="20px" height="20px" />
+                             </template>
+@@ -129,9 +140,22 @@
+         <v-card>
+             <v-card-title class="d-flex justify-center pt-6 font-weight-bold">本当に録画ファイルを削除しますか？</v-card-title>
+             <v-card-text class="pt-2 pb-0">
+-                <div class="delete-confirmation__file-path mb-4">{{ program.recorded_video.file_path }}</div>
++                <div class="font-weight-bold mb-2">{{ program.title }}</div>
++                <template v-if="deletePreview?.enabled && deletePreview.plan">
++                    <div class="mb-2">管理元: EPGStation / 録画ID: {{ deletePreview.plan.epgstation_id }}</div>
++                    <div v-for="file in deletePreview.plan.files" :key="file.path" class="delete-confirmation__file-path mb-2">
++                        {{ file.path }} ({{ file.size.toLocaleString() }} bytes)
++                    </div>
++                    <div class="mb-4">録画本体はEPGStationで削除し、KonomiTVとJellyfinの一覧も更新します。通信失敗時は同期状態を記録して再試行します。</div>
++                </template>
++                <div v-else class="delete-confirmation__file-path mb-4">{{ program.recorded_video.file_path }}</div>
+                 <div class="text-error-lighten-1 font-weight-bold">
+-                    この録画ファイルに関連するすべてのデータ (サムネイル / .ts.program.txt / .ts.err を含む) が削除されます。<br>
++                    <template v-if="deletePreview?.enabled">
++                        上記の録画ファイルと、EPGStationが管理する関連データを削除します。<br>
++                    </template>
++                    <template v-else>
++                        この録画ファイルに関連するすべてのデータ (サムネイル / .ts.program.txt / .ts.err を含む) が削除されます。<br>
++                    </template>
+                     元に戻すことはできません。本当に録画ファイルを削除しますか？
+                 </div>
+             </v-card-text>
+@@ -151,11 +175,12 @@
+ </template>
+ <script lang="ts" setup>
+ 
+-import { ref, computed } from 'vue';
++import { ref, computed, watch } from 'vue';
+ 
+ import RecordedFileInfoDialog from '@/components/Videos/Dialogs/RecordedFileInfoDialog.vue';
+ import Message from '@/message';
+-import Videos, { IRecordedProgram } from '@/services/Videos';
++import { recordingProtectionBadges, requestRecordingProtectionBadge, updateRecordingProtectionBadge } from '@/services/RecordingProtectionBadges';
++import Videos, { IRecordedProgram, IRecordingDeletePreview, IRecordingProtection } from '@/services/Videos';
+ import useSettingsStore from '@/stores/SettingsStore';
+ import useUserStore from '@/stores/UserStore';
+ import Utils, { ProgramUtils } from '@/utils';
+@@ -179,6 +204,49 @@ const emit = defineEmits<{
+ const show_video_info = ref(false);
+ // 削除確認ダイアログの表示状態
+ const show_delete_confirmation = ref(false);
++const deletePreview = ref<IRecordingDeletePreview | null>(null);
++
++// 一覧に並んだ時点でまとめて取得し、メニューを開かなくても分かるようにする。
++// ローカル改造: バッジ取得 (ログイン時のみ実行される) の結果があればそれを優先し、
++// 未取得・状態不明のときは一覧 API の応答に含まれる is_protected にフォールバックする
++// (これにより、ログアウト中でもログイン時と同じ「保護中」バッジが表示される)
++const isProtected = computed(() => {
++    const badge_state = recordingProtectionBadges.get(props.program.id);
++    if (badge_state !== undefined && badge_state !== null) {
++        return badge_state;
++    }
++    return props.program.is_protected === true;
++});
++watch(() => [props.program.id, useUserStore().user?.id], () => {
++    if (useUserStore().user) requestRecordingProtectionBadge(props.program.id);
++}, {immediate: true});
++
++// 一覧全件をポーリングせず、操作メニューを開いたときだけ管理元から読む。
++const menuOpen = ref(false);
++const protection = ref<IRecordingProtection | null>(null);
++const protectionBusy = ref(false);
++watch(menuOpen, async open => {
++    if (!open || !useUserStore().user?.is_admin || props.program.recorded_video.status === 'Recording') return;
++    protectionBusy.value = true;
++    protection.value = null;
++    try {
++        protection.value = await Videos.fetchProtection(props.program.id);
++        if (protection.value?.enabled) updateRecordingProtectionBadge(props.program.id, protection.value.is_protected);
++    }
++    finally { protectionBusy.value = false; }
++});
++const toggleProtection = async () => {
++    if (protectionBusy.value || protection.value?.epgstation_id == null) return;
++    protectionBusy.value = true;
++    try {
++        const next = !protection.value.is_protected;
++        protection.value = await Videos.setProtection(props.program.id, protection.value.epgstation_id, next);
++        if (protection.value) {
++            updateRecordingProtectionBadge(props.program.id, protection.value.is_protected);
++            Message.success(next ? '録画を保護しました。' : '録画の保護を解除しました。');
++        }
++    } finally { protectionBusy.value = false; }
++};
+ 
+ // 録画ファイルのダウンロード (location.href を変更し、ダウンロード自体はブラウザに任せる)
+ const downloadVideo = () => {
+@@ -247,12 +315,14 @@ const removeFromWatchedHistory = () => {
+ };
+ 
+ // 録画ファイル削除確認ダイアログを表示
+-const showDeleteConfirmation = () => {
++const showDeleteConfirmation = async () => {
+     const userStore = useUserStore();
+     if (userStore.user === null || userStore.user.is_admin === false) {
+         Message.warning('録画ファイルを削除するには管理者権限が必要です。\n管理者アカウントでログインし直してください。');
+         return;
+     }
++    deletePreview.value = await Videos.fetchDeletePreview(props.program.id);
++    if (deletePreview.value === null) return;
+     show_delete_confirmation.value = true;
+ };
+ 
+@@ -261,7 +331,7 @@ const deleteVideo = async () => {
+     show_delete_confirmation.value = false;
+     Message.info('録画ファイルの削除を開始します。完了までしばらくお待ちください。');
+ 
+-    const result = await Videos.deleteVideo(props.program.id);
++    const result = await Videos.deleteVideo(props.program.id, deletePreview.value?.confirmation_token);
+     if (result === true) {
+         Message.success('録画ファイルを削除しました。');
+         // 親コンポーネントに削除イベントを発行
+@@ -404,6 +474,24 @@ const deleteVideo = async () => {
+         }
+     }
+ 
++    &__protection {
++        position: absolute;
++        bottom: 4px;
++        left: 4px;
++        display: flex;
++        align-items: center;
++        gap: 3px;
++        padding: 3px 5px;
++        border: 1px solid rgba(var(--v-theme-warning), .45);
++        border-radius: 3px;
++        background: rgba(0, 0, 0, .82);
++        color: rgb(var(--v-theme-warning));
++        font-size: 11px;
++        font-weight: 700;
++        line-height: 1;
++        pointer-events: none;
++    }
++
+     &__content {
+         display: flex;
+         flex-direction: column;
+diff --git a/client/src/services/RecordingProtectionBadges.ts b/client/src/services/RecordingProtectionBadges.ts
+new file mode 100644
+index 0000000..3744ac6
+--- /dev/null
++++ b/client/src/services/RecordingProtectionBadges.ts
+@@ -0,0 +1,45 @@
++import { reactive } from 'vue';
++
++import APIClient from '@/services/APIClient';
++
++/** 一覧の表示用。削除の安全確認には常に管理元の最新値を使う。 */
++export const recordingProtectionBadges = reactive(new Map<number, boolean | null>());
++const versions = new Map<number, number>();
++const pending = new Set<number>();
++let scheduled = false;
++
++export function updateRecordingProtectionBadge(id: number, value: boolean | null): void {
++    versions.set(id, (versions.get(id) ?? 0) + 1);
++    recordingProtectionBadges.set(id, value);
++}
++
++/** 同じ描画周期のカードをまとめ、カードごとのAPI呼び出しや定期ポーリングを避ける。 */
++export function requestRecordingProtectionBadge(id: number): void {
++    versions.set(id, (versions.get(id) ?? 0) + 1);
++    pending.add(id);
++    if (scheduled) return;
++    scheduled = true;
++    queueMicrotask(() => { void flush(); });
++}
++
++async function flush(): Promise<void> {
++    scheduled = false;
++    const ids = [...pending];
++    pending.clear();
++    for (let offset = 0; offset < ids.length; offset += 60) {
++        const batch = ids.slice(offset, offset + 60);
++        const expected = new Map(batch.map(id => [id, versions.get(id)]));
++        const query = new URLSearchParams(batch.map(id => ['video_ids', String(id)]));
++        try {
++            const response = await APIClient.get<{enabled: boolean; states: Record<string, boolean | null>}>(`/recorder/protection?${query}`);
++            for (const id of batch) {
++                // 操作後に、古い一覧取得結果で保護表示を巻き戻さない。
++                if (versions.get(id) !== expected.get(id)) continue;
++                recordingProtectionBadges.set(id, response.type === 'success' && response.data.enabled ? response.data.states[String(id)] ?? null : null);
++            }
++        } catch {
++            // 不明を「未保護」と断定しない。実際の削除・解除時には別途確認する。
++            for (const id of batch) if (versions.get(id) === expected.get(id)) recordingProtectionBadges.set(id, null);
++        }
++    }
++}
+diff --git a/client/src/services/Videos.ts b/client/src/services/Videos.ts
+index d1e72a4..22e9a7f 100644
+--- a/client/src/services/Videos.ts
++++ b/client/src/services/Videos.ts
+@@ -1,8 +1,21 @@
+ 
++import Message from '@/message';
+ import APIClient from  '@/services/APIClient';
+ import { IChannel } from '@/services/Channels';
+ import { CommentUtils } from '@/utils';
+ 
++/** EPGStation が確認した削除対象。トークンは確認画面の寿命だけ保持する。 */
++export interface IRecordingDeletePreview {
++    enabled: boolean;
++    confirmation_token: string | null;
++    plan: {
++        video_id: number;
++        epgstation_id: number;
++        title: string;
++        expires_at: number;
++        files: {path: string; size: number;}[];
++    } | null;
++}
+ /** ソート順序を表す型 */
+ export type SortOrder = 'desc' | 'asc';
+ 
+@@ -107,6 +120,7 @@ export interface IRecordedProgram {
+     recording_start_margin: number;
+     recording_end_margin: number;
+     is_partially_recorded: boolean;
++    is_protected: boolean | null;
+     channel: IChannel | null;
+     network_id: number | null;
+     service_id: number | null;
+@@ -139,6 +153,7 @@ export const IRecordedProgramDefault: IRecordedProgram = {
+     recording_start_margin: 0,
+     recording_end_margin: 0,
+     is_partially_recorded: false,
++    is_protected: null,
+     channel: null,
+     network_id: null,
+     service_id: null,
+@@ -188,6 +203,12 @@ export interface IJikkyoComments {
+ }
+ 
+ 
++export interface IRecordingProtection {
++    enabled: boolean;
++    epgstation_id: number | null;
++    is_protected: boolean | null;
++}
++
+ class Videos {
+ 
+     /**
+@@ -357,10 +378,40 @@ class Videos {
+      * @param video_id 録画番組の ID
+      * @returns 削除に成功した場合は true
+      */
+-    static async deleteVideo(video_id: number): Promise<boolean> {
++    /** 削除前に管理元・保護状態・全対象ファイルを確認する。 */
++    static async fetchProtection(video_id: number): Promise<IRecordingProtection | null> {
++        const response = await APIClient.get<IRecordingProtection>(`/videos/${video_id}/protection`);
++        if (response.type === 'error') {
++            APIClient.showGenericError(response, '録画の保護状態を確認できませんでした。');
++            return null;
++        }
++        return response.data;
++    }
++
++    static async setProtection(video_id: number, epgstation_id: number, is_protected: boolean): Promise<IRecordingProtection | null> {
++        const response = await APIClient.put<IRecordingProtection>(`/videos/${video_id}/protection`, {epgstation_id, is_protected});
++        if (response.type === 'error') {
++            APIClient.showGenericError(response, '保護状態の変更を確認できません。メニューを開き直してください。');
++            return null;
++        }
++        return response.data;
++    }
++
++    static async fetchDeletePreview(video_id: number): Promise<IRecordingDeletePreview | null> {
++        const response = await APIClient.get<IRecordingDeletePreview>(`/videos/${video_id}/delete-preview`);
++        if (response.type === 'error') {
++            APIClient.showGenericError(response, '管理元と削除対象を確認できないため、削除を中止しました。');
++            return null;
++        }
++        return response.data;
++    }
++
++    static async deleteVideo(video_id: number, confirmation_token?: string | null): Promise<boolean> {
+ 
+         // API リクエストを実行
+-        const response = await APIClient.delete(`/videos/${video_id}`);
++        const response = await APIClient.delete(`/videos/${video_id}`, {
++            headers: confirmation_token ? {'X-Recording-Confirmation': confirmation_token} : {},
++        });
+ 
+         // エラー処理
+         if (response.type === 'error') {
+@@ -372,6 +423,9 @@ class Videos {
+             return false;
+         }
+ 
++        if (response.headers['x-recording-sync'] === 'JellyfinPending') {
++            Message.warning('録画は削除されました。Jellyfinの一覧更新はバックグラウンドで再試行しています。');
++        }
+         return true;
+     }
+ }
+diff --git a/server/app/app.py b/server/app/app.py
+index e678d65..bffd582 100644
+--- a/server/app/app.py
++++ b/server/app/app.py
+@@ -31,6 +31,7 @@ from app.routers import (
+     MaintenanceRouter,
+     NiconicoRouter,
+     ProgramsRouter,
++    RecorderRouter,
+     RecordingPresetsRouter,
+     ReservationConditionsRouter,
+     ReservationsRouter,
+@@ -70,6 +71,7 @@ app = FastAPI(
+ app.include_router(ChannelsRouter.router)
+ app.include_router(ProgramsRouter.router)
+ app.include_router(VideosRouter.router)
++app.include_router(RecorderRouter.router)
+ app.include_router(SeriesRouter.router)
+ app.include_router(LiveStreamsRouter.router)
+ app.include_router(VideoStreamsRouter.router)
+diff --git a/server/app/metadata/RecordedScanTask.py b/server/app/metadata/RecordedScanTask.py
+index 8414de3..46e4f25 100644
+--- a/server/app/metadata/RecordedScanTask.py
++++ b/server/app/metadata/RecordedScanTask.py
+@@ -1440,6 +1440,12 @@ class RecordedScanTask:
+                     # CASCADE 制約により RecordedVideo も同時に削除される (Channel は親テーブルにあたるため削除されない)
+                     await db_recorded_video.recorded_program.delete()
+                     logging.info(f'{file_path}: Deleted record for removed file.')
++                    # NFS の監視イベントを既存スキャナーが検出できた場合だけ更新を要求する。
++                    # EPGStation から削除したときも連動し、追加の全ライブラリ監視は作らない。
++                    from app.utils.RecorderDeleteSync import GetRecorderDeleteSync
++                    service = GetRecorderDeleteSync()
++                    if service is not None:
++                        service.queueExternalRefresh(str(file_path))
+ 
+             except Exception as ex:
+                 logging.error(f'{file_path}: Error handling file deletion inside lock:', exc_info=ex)
+diff --git a/server/app/routers/RecorderRouter.py b/server/app/routers/RecorderRouter.py
+new file mode 100644
+index 0000000..6644acf
+--- /dev/null
++++ b/server/app/routers/RecorderRouter.py
+@@ -0,0 +1,117 @@
++"""録画削除連動の状態確認と、保留中メタデータ同期の実行。"""
++
++import asyncio
++from typing import Annotated
++
++from fastapi import APIRouter, Depends, Query
++from pydantic import BaseModel
++
++from app.models.RecordedProgram import RecordedProgram
++from app.models.User import User
++from app.routers.UsersRouter import GetCurrentAdminUser, GetCurrentUser
++from app.utils.RecorderDeleteSync import DeleteSyncJob, GetRecorderDeleteSync
++
++
++router = APIRouter(tags=['Recorder'], prefix='/api/recorder')
++_worker: asyncio.Task[None] | None = None
++
++
++class RecorderDeleteSyncStatus(BaseModel):
++    enabled: bool
++    jobs: list[DeleteSyncJob]
++
++
++class RecordingProtectionBadges(BaseModel):
++    enabled: bool
++    states: dict[int, bool | None]
++
++
++@router.get('/protection', response_model=RecordingProtectionBadges)
++async def RecordingProtectionBadgesAPI(
++    video_ids: Annotated[list[int], Query(min_length=1, max_length=60)],
++    current_user: Annotated[User, Depends(GetCurrentUser)],
++):
++    """表示中の録画だけの保護状態を返す。パスや管理元 ID は返さない。
++
++    Args:
++        video_ids: 表示対象。最大60件。
++        current_user: 認証済みの視聴者または管理者。
++    Returns:
++        保護状態。管理外・曖昧な録画は None。
++    """
++    ids = list(dict.fromkeys(video_ids))
++    service = GetRecorderDeleteSync()
++    if service is None:
++        return RecordingProtectionBadges(enabled=False, states=dict.fromkeys(ids))
++    programs = await RecordedProgram.filter(id__in=ids).select_related('recorded_video')
++    states: dict[int, bool | None] = dict.fromkeys(ids)
++    states.update(await service.protectionStates({program.id: program.recorded_video.file_path for program in programs}))
++    return RecordingProtectionBadges(enabled=True, states=states)
++
++
++@router.get('/delete-sync', response_model=RecorderDeleteSyncStatus)
++async def RecorderDeleteSyncStatusAPI(current_user: Annotated[User, Depends(GetCurrentAdminUser)]):
++    """管理者へ失敗・保留を含めた同期状態を返す。
++
++    Args:
++        current_user: 認証済み管理者。
++    Returns:
++        同期状態。認証情報・確認トークンは含めない。
++    """
++    service = GetRecorderDeleteSync()
++    return RecorderDeleteSyncStatus(enabled=service is not None, jobs=service.jobs() if service else [])
++
++
++@router.post('/delete-sync/retry', status_code=202)
++async def RecorderDeleteSyncRetryAPI(current_user: Annotated[User, Depends(GetCurrentAdminUser)]):
++    """保留中の一覧同期だけを再試行する。EPGStation の DELETE は再送しない。
++
++    Args:
++        current_user: 認証済み管理者。
++    Returns:
++        更新要求の受付状態。
++    """
++    service = GetRecorderDeleteSync()
++    if service:
++        for job in service.jobs():
++            if job.state not in ['Complete', 'NeedsAttention']:
++                job.retry_at = 0
++                job.jellyfin_refresh_requested = False
++                service.saveJob(job)
++
++
++@router.on_event('startup')
++async def StartRecorderDeleteSyncWorker() -> None:
++    """有効な環境だけで、復旧用ワーカーを開始する。
++
++    Args:
++        なし。
++    Returns:
++        なし。
++    """
++    global _worker
++    service = GetRecorderDeleteSync()
++    if service is not None and _worker is None:
++        _worker = asyncio.create_task(service.runWorker())
++
++
++@router.on_event('shutdown')
++async def StopRecorderDeleteSyncWorker() -> None:
++    """保留状態を残したまま停止する。
++
++    Args:
++        なし。
++    Returns:
++        なし。
++    """
++    global _worker
++    if _worker is not None:
++        _worker.cancel()
++        try:
++            await _worker
++        except asyncio.CancelledError:
++            pass
++        _worker = None
++    service = GetRecorderDeleteSync()
++    if service:
++        await service.client.aclose()
+diff --git a/server/app/routers/VideosRouter.py b/server/app/routers/VideosRouter.py
+index 6f485b2..f3edd7a 100644
+--- a/server/app/routers/VideosRouter.py
++++ b/server/app/routers/VideosRouter.py
+@@ -32,6 +32,12 @@ from app.models.User import User
+ from app.routers.UsersRouter import GetCurrentAdminUser
+ from app.utils.DriveIOLimiter import DriveIOLimiter
+ from app.utils.JikkyoClient import JikkyoClient
++from app.utils.RecorderDeleteSync import (
++    GetRecorderDeleteSync,
++    RecordingDeletePreview,
++    RecordingProtection,
++    RecordingProtectionUpdate,
++)
+ 
+ 
+ # ルーター
+@@ -148,6 +154,39 @@ async def ConvertRowToRecordedProgram(row: dict[str, Any]) -> schemas.RecordedPr
+     return schemas.RecordedProgram.model_validate(recorded_program_dict)
+ 
+ 
++async def AttachProtectionStates(recorded_programs: list[schemas.RecordedProgram]) -> None:
++    """
++    ローカル改造: 録画番組の一覧・検索 API の応答に、削除保護の状態 (is_protected) を付与する
++    一覧・検索 API は未ログインでも閲覧できるため、応答に含めることで、ログアウト中でも
++    録画カードにログイン時と同じ「保護中」バッジを表示できるようにする
++    (保護状態の取得専用の未認証 API を新設しないための方式)
++    状態の取得自体は既存の RecorderDeleteSync.protectionStates() をページ単位で 1 回だけ呼ぶ
++    取得に失敗しても一覧表示自体は継続できるよう、例外時は is_protected を None (状態不明) のままにする
++
++    Args:
++        recorded_programs (list[schemas.RecordedProgram]): 応答に含める録画番組のリスト
++    """
++
++    if len(recorded_programs) == 0:
++        return
++
++    # 録画削除連動が無効な場合は何もしない
++    service = GetRecorderDeleteSync()
++    if service is None:
++        return
++
++    try:
++        states = await service.protectionStates(
++            {program.id: program.recorded_video.file_path for program in recorded_programs}
++        )
++    except Exception as ex:
++        logging.error('[VideosRouter][AttachProtectionStates] Failed to fetch protection states:', exc_info=ex)
++        return
++
++    for program in recorded_programs:
++        program.is_protected = states.get(program.id)
++
++
+ async def GetRecordedProgram(video_id: Annotated[int, Path(description='録画番組の ID 。')]) -> RecordedProgram:
+     """ 録画番組 ID から録画番組情報を取得する """
+ 
+@@ -481,6 +520,9 @@ async def VideosAPI(
+             id_to_index = {id: index for index, id in enumerate(target_ids)}
+             recorded_programs = sorted(recorded_programs, key=lambda x: id_to_index[x.id])
+ 
++        # ローカル改造: 削除保護の状態を応答に含める (ログアウト中でも保護バッジを表示するため)
++        await AttachProtectionStates(recorded_programs)
++
+         return schemas.RecordedPrograms(
+             total = total,
+             recorded_programs = recorded_programs,
+@@ -663,6 +705,9 @@ async def VideosSearchAPI(
+         for row in rows[1]:  # rows[0] はカラム情報、rows[1] が実際のデータ
+             recorded_programs.append(await ConvertRowToRecordedProgram(row))
+ 
++        # ローカル改造: 削除保護の状態を応答に含める (ログアウト中でも保護バッジを表示するため)
++        await AttachProtectionStates(recorded_programs)
++
+         return schemas.RecordedPrograms(
+             total = total,
+             recorded_programs = recorded_programs,
+@@ -692,6 +737,71 @@ async def VideoAPI(
+     return recorded_program
+ 
+ 
++@router.get('/{video_id}/protection', response_model=RecordingProtection)
++async def VideoProtectionAPI(
++    recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
++    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
++):
++    """管理者へ管理元の保護状態を返す。
++
++    Args:
++        recorded_program: 対象録画。
++        current_user: 認証済み管理者。
++    Returns:
++        現在の保護状態。
++    """
++    service = GetRecorderDeleteSync()
++    if service is None:
++        return RecordingProtection(enabled=False)
++    if recorded_program.recorded_video.status == 'Recording':
++        raise HTTPException(409, 'Recording is still in progress')
++    return await service.protection(recorded_program.id, recorded_program.recorded_video.file_path)
++
++
++@router.put('/{video_id}/protection', response_model=RecordingProtection)
++async def VideoProtectionUpdateAPI(
++    update: RecordingProtectionUpdate,
++    recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
++    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
++):
++    """保護・解除だけを管理元に反映し、録画ファイルには触れない。
++
++    Args:
++        update: 管理元 ID と希望する状態。
++        recorded_program: 対象録画。
++        current_user: 認証済み管理者。
++    Returns:
++        管理元で再確認した保護状態。
++    """
++    service = GetRecorderDeleteSync()
++    if service is None:
++        raise HTTPException(409, 'Recorder integration is disabled')
++    if recorded_program.recorded_video.status == 'Recording':
++        raise HTTPException(409, 'Recording is still in progress')
++    return await service.setProtection(recorded_program.id, recorded_program.recorded_video.file_path, update)
++
++
++@router.get('/{video_id}/delete-preview', response_model=RecordingDeletePreview)
++async def VideoDeletePreviewAPI(
++    recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
++    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
++):
++    """削除対象を管理元と照合し、確認画面へ渡す。
++
++    Args:
++        recorded_program: DB から取得した対象。
++        current_user: 認証済み管理者。
++    Returns:
++        削除計画と有効期限付きの確認トークン。
++    """
++    service = GetRecorderDeleteSync()
++    if service is None:
++        return RecordingDeletePreview(enabled=False)
++    if recorded_program.recorded_video.status == 'Recording':
++        raise HTTPException(409, 'Recording is still in progress')
++    plan = await service.plan(recorded_program.id, recorded_program.recorded_video.file_path)
++    return RecordingDeletePreview(enabled=True, plan=plan, confirmation_token=service.sign(plan))
++
+ @router.get(
+     '/{video_id}/download',
+     summary = '録画番組ダウンロード API',
+@@ -938,6 +1048,7 @@ async def VideoThumbnailRegenerateAPI(
+     status_code = status.HTTP_204_NO_CONTENT,
+ )
+ async def VideoDeleteAPI(
++    request: Request,
+     recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
+     current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+ ):
+@@ -951,6 +1062,16 @@ async def VideoDeleteAPI(
+     JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
+     """
+ 
++    # EPGStation が管理元の構成では、直接ファイルや DB を先に消す旧経路へ進まない。
++    service = GetRecorderDeleteSync()
++    if service is not None:
++        if recorded_program.recorded_video.status == 'Recording':
++            raise HTTPException(409, 'Recording is still in progress')
++        token = request.headers.get('X-Recording-Confirmation')
++        if not token:
++            raise HTTPException(409, 'Open the deletion confirmation dialog before deleting')
++        job = await service.delete(recorded_program.id, recorded_program.recorded_video.file_path, token)
++        return Response(status_code=204, headers={'X-Recording-Sync': job.state})
+     # 録画ファイルの情報を取得
+     file_path = anyio.Path(recorded_program.recorded_video.file_path)
+     file_hash = recorded_program.recorded_video.file_hash
+diff --git a/server/app/schemas.py b/server/app/schemas.py
+index f8159b0..33ac0bd 100644
+--- a/server/app/schemas.py
++++ b/server/app/schemas.py
+@@ -214,6 +214,8 @@ class RecordedProgram(PydanticModel):
+     recording_start_margin: float = 0.0  # 取得できなかった場合のデフォルト値
+     recording_end_margin: float = 0.0  # 取得できなかった場合のデフォルト値
+     is_partially_recorded: bool = False
++    # ローカル改造: 削除保護の状態 (一覧・検索 API でのみ付与される。None は状態不明)
++    is_protected: bool | None = None
+     channel: Channel | None = None  # MPEG-TS 形式かつ SDT の解析に成功した場合のみセット
+     network_id: int | None = None  # MPEG-TS 形式かつ SDT の解析に成功した場合のみセット
+     service_id: int | None = None  # MPEG-TS 形式かつ SDT の解析に成功した場合のみセット
+diff --git a/server/app/utils/RecorderDeleteSync.py b/server/app/utils/RecorderDeleteSync.py
+new file mode 100644
+index 0000000..42fcb25
+--- /dev/null
++++ b/server/app/utils/RecorderDeleteSync.py
+@@ -0,0 +1,639 @@
++"""EPGStation を管理元とする、確認済み録画の削除とメタデータ同期。"""
++
++from __future__ import annotations
++
++import asyncio
++import base64
++import hashlib
++import hmac
++import json
++import os
++import secrets
++import stat
++import time
++from pathlib import Path
++from typing import Annotated, Literal
++
++import httpx
++from fastapi import HTTPException
++from pydantic import BaseModel, Field
++
++from app import logging
++from app.constants import BASE_DIR, DATA_DIR
++
++
++class RecorderDeleteConfig(BaseModel):
++    """接続先と保存先の対応。秘密情報は別のローカルファイルから読む。"""
++
++    enabled: bool = False
++    epgstation_url: str
++    recording_root: Path
++    epgstation_recording_root: Path
++    jellyfin_url: str | None = None
++    jellyfin_access_file: Path | None = None
++    jellyfin_recording_root: Path | None = None
++    state_directory: Path = DATA_DIR / 'recorder-delete-sync'
++
++
++class EPGVideoFile(BaseModel):
++    id: int
++    filename: str
++    size: int
++
++
++class EPGRecording(BaseModel):
++    id: int
++    name: str
++    is_recording: Annotated[bool, Field(alias='isRecording')]
++    is_protected: Annotated[bool, Field(alias='isProtected')]
++    is_encoding: Annotated[bool, Field(alias='isEncoding')]
++    video_files: Annotated[list[EPGVideoFile], Field(alias='videoFiles', default_factory=list)]
++
++
++class EPGRecordings(BaseModel):
++    records: list[EPGRecording]
++    total: int
++
++
++class DeleteFileSnapshot(BaseModel):
++    path: str
++    size: int
++    device: int
++    inode: int
++    modified_ns: int
++
++
++class RecordingDeletePlan(BaseModel):
++    video_id: int
++    epgstation_id: int
++    title: str
++    files: list[DeleteFileSnapshot]
++    expires_at: int
++
++
++class RecordingProtection(BaseModel):
++    enabled: bool
++    epgstation_id: int | None = None
++    is_protected: bool | None = None
++
++
++class RecordingProtectionUpdate(BaseModel):
++    epgstation_id: int
++    is_protected: bool
++
++
++class RecordingDeletePreview(BaseModel):
++    enabled: bool
++    plan: RecordingDeletePlan | None = None
++    confirmation_token: str | None = None
++
++
++class DeleteSyncJob(BaseModel):
++    id: Annotated[str, Field(pattern='^[a-z0-9-]{1,80}$')]
++    plan: RecordingDeletePlan | None = None
++    state: Literal['Prepared', 'EPGDeleteRequested', 'MetadataPending', 'JellyfinPending', 'Complete', 'NeedsAttention']
++    attempts: int = 0
++    retry_at: float = 0
++    error: str | None = None
++    jellyfin_refresh_requested: bool = False
++    deleted_paths: Annotated[list[str], Field(description='Externally removed recording paths')] = []
++
++
++class JellyfinItem(BaseModel):
++    path: Annotated[str | None, Field(alias='Path')] = None
++
++
++class JellyfinItems(BaseModel):
++    items: Annotated[list[JellyfinItem], Field(alias='Items')]
++    total: Annotated[int, Field(alias='TotalRecordCount')]
++
++
++def LoadRecorderDeleteConfig() -> RecorderDeleteConfig | None:
++    """設定ファイルがない環境では無効にする。
++
++    Args:
++        なし。
++    Returns:
++        有効な設定、または無効時の None。
++    """
++    path = Path(os.environ.get('KONOMITV_RECORDER_CONFIG', str(BASE_DIR.parent / 'customizations.local.json')))
++    if not path.is_file():
++        return None
++    config = RecorderDeleteConfig.model_validate_json(path.read_text(encoding='utf-8'))
++    if not config.enabled:
++        return None
++    # 接続先は管理者が設定する固定値だけを利用し、録画情報・リクエストから URL を組み立てない。
++    for url in [config.epgstation_url, config.jellyfin_url]:
++        if url is not None and (httpx.URL(url).scheme not in ['http', 'https'] or httpx.URL(url).username):
++            raise ValueError('Invalid recorder integration URL')
++    return config
++
++
++class RecorderDeleteSync:
++    """ファイルを直接 unlink せず、EPGStation の正式 API で削除を委譲する。"""
++
++    def __init__(self, config: RecorderDeleteConfig, client: httpx.AsyncClient | None = None) -> None:
++        """削除・同期の接続と排他制御を初期化する。
++
++        Args:
++            config: ローカル設定。テスト時は専用保存先を指定する。
++            client: モック通信を注入できる HTTP クライアント。
++        Returns:
++            なし。
++        """
++        # 各 API と復旧処理で共有する設定。録画本体の保存先は固定する。
++        self.config = config
++        # EPGStation と Jellyfin への接続。リダイレクトで別サーバーに移動しない。
++        self.client = client or httpx.AsyncClient(timeout=15, follow_redirects=False)
++        # 確認から削除までの競合を、このプロセス内では直列化する。
++        self.lock = asyncio.Lock()
++        # 復旧処理が待機中なら、削除・監視イベントから起こす。
++        self.event = asyncio.Event()
++        # 確認トークンと復旧記録は録画ファイルと別のローカル領域に置く。
++        config.state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
++        key_path = config.state_directory / 'confirmation.key'
++        try:
++            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
++        except FileExistsError:
++            pass
++        else:
++            with os.fdopen(fd, 'wb') as output:
++                output.write(secrets.token_bytes(32))
++        # 再起動をまたいでも有効期限内の確認と復旧が可能な署名鍵。
++        self.key = key_path.read_bytes()
++        if len(self.key) != 32:
++            raise ValueError('Invalid confirmation key; restore the key before enabling deletion')
++
++    def canonicalPath(self, filename: str, require_exists: bool = True) -> Path:
++        """EPGStation の保存先をローカルマウントへ対応付ける。
++
++        Args:
++            filename: EPGStation が返したファイル名。
++            require_exists: 確認時は存在必須。削除後の確認時だけ False。
++        Returns:
++            シンボリックリンクを含まない保存先内の絶対パス。
++        """
++        root = self.config.recording_root.absolute()
++        if root.resolve() != root:
++            raise HTTPException(409, 'Configured storage root must not contain symlinks')
++        source = Path(filename)
++        # 絶対パスを返す構成では、明示された EPGStation 側ルートだけを変換する。
++        if source.is_absolute():
++            try:
++                source = source.relative_to(self.config.epgstation_recording_root.absolute())
++            except ValueError as ex:
++                raise HTTPException(409, 'EPGStation file is outside configured storage') from ex
++        if not source.parts or any(part in ['..', '.'] for part in source.parts):
++            raise HTTPException(409, 'Unsafe recording path')
++        candidate = root / source
++        # 録画ディレクトリ自体や途中の要素がリンクの場合も拒否する。
++        current = root
++        for part in [None, *source.parts]:
++            if part is not None:
++                current = current / part
++            if current.is_symlink():
++                raise HTTPException(409, 'Symlink recording paths cannot be deleted')
++        if not candidate.resolve().is_relative_to(root.resolve()):
++            raise HTTPException(409, 'Recording path escaped configured storage')
++        if require_exists and (not candidate.is_file() or not stat.S_ISREG(candidate.stat().st_mode)):
++            raise HTTPException(409, 'Recording file is missing or is not a regular file')
++        return candidate
++
++    def localPath(self, filename: str, require_exists: bool = True) -> Path:
++        """KonomiTV 側の絶対パスを同じ保存先検証へ通す。
++
++        Args:
++            filename: KonomiTV 側の保存先。
++            require_exists: 削除後だけ False。
++        Returns:
++            検証済みのローカルパス。
++        """
++        try:
++            relative = Path(filename).relative_to(self.config.recording_root.absolute())
++        except ValueError as ex:
++            raise HTTPException(409, 'KonomiTV file is outside configured storage') from ex
++        return self.canonicalPath(str(relative), require_exists)
++
++    def snapshot(self, path: Path) -> DeleteFileSnapshot:
++        """確認画面に表示した実ファイルの同一性を保存する。
++
++        Args:
++            path: 検証済みの保存先。
++        Returns:
++            ファイルのサイズ・識別子・更新時刻。
++        """
++        value = path.stat()
++        return DeleteFileSnapshot(path=str(path), size=value.st_size, device=value.st_dev,
++            inode=value.st_ino, modified_ns=value.st_mtime_ns)
++
++    async def request(self, method: str, path: str) -> httpx.Response:
++        """管理元 API への通信失敗を安全なエラーとして返す。
++
++        Args:
++            method: HTTP メソッド。
++            path: 固定 API パス。
++        Returns:
++            正常応答または存在確認に使う 404 応答。
++        """
++        try:
++            response = await self.client.request(method, self.config.epgstation_url.rstrip('/') + path)
++            if response.status_code != 404:
++                response.raise_for_status()
++            return response
++        except httpx.HTTPError as ex:
++            raise HTTPException(502, 'EPGStation did not confirm the operation; recording was not deleted locally') from ex
++
++    async def recordings(self) -> list[EPGRecording]:
++        """ページングして全録画の管理情報を読む。
++
++        Args:
++            なし。
++        Returns:
++            管理元の録画情報。
++        """
++        result: list[EPGRecording] = []
++        while True:
++            response = await self.request('GET', f'/recorded?isHalfWidth=false&offset={len(result)}&limit=100')
++            page = EPGRecordings.model_validate(response.json())
++            result.extend(page.records)
++            if len(result) >= page.total:
++                return result
++            if not page.records:
++                raise HTTPException(502, 'Incomplete EPGStation recording list')
++
++    async def plan(self, video_id: int, file_path: str, allow_protected: bool = False) -> RecordingDeletePlan:
++        """正規化パスの完全一致で対象を一意にする。
++
++        Args:
++            video_id: KonomiTV の録画 ID。
++            file_path: KonomiTV の DB が保持する保存先。
++            allow_protected: 保護操作の照合時だけ、保護中の録画も許可する。
++        Returns:
++            確認後に署名する削除計画。
++        """
++        target = self.localPath(file_path)
++        matches: list[EPGRecording] = []
++        for record in await self.recordings():
++            for video in record.video_files:
++                try:
++                    path = self.canonicalPath(video.filename, require_exists=False)
++                except HTTPException:
++                    continue
++                if path == target:
++                    matches.append(record)
++        if len(matches) != 1:
++            raise HTTPException(409, 'Recording is unmanaged or has an ambiguous EPGStation mapping')
++        record = matches[0]
++        # 正式削除 API は録画中の停止もできるため、こちらで必ず禁止する。
++        if record.is_recording or (record.is_protected and not allow_protected) or record.is_encoding:
++            raise HTTPException(409, 'Recording is active, protected, or encoding')
++        if not record.video_files or len(record.video_files) > 20:
++            raise HTTPException(409, 'Recording file set cannot be safely confirmed')
++        paths = [self.canonicalPath(video.filename) for video in record.video_files]
++        if len(set(paths)) != len(paths):
++            raise HTTPException(409, 'Duplicate file references in EPGStation')
++        # 同じファイルを別の録画 ID が参照する場合、API が他の録画を壊すため拒否する。
++        records = await self.recordings()
++        for other in records:
++            if other.id == record.id:
++                continue
++            for video in other.video_files:
++                try:
++                    path = self.canonicalPath(video.filename, require_exists=False)
++                except HTTPException:
++                    continue
++                if path in paths:
++                    raise HTTPException(409, 'Another recording references the same file')
++        return RecordingDeletePlan(video_id=video_id, epgstation_id=record.id, title=record.name,
++            files=[self.snapshot(path) for path in paths], expires_at=int(time.time()) + 300)
++
++    async def protectionStates(self, files: dict[int, str]) -> dict[int, bool | None]:
++        """一覧の保護表示用に、管理元を一度だけ読みパスで照合する。
++
++        Args:
++            files: 表示中の録画 ID と DB の保存先。
++        Returns:
++            保護状態。対応が不明・曖昧な録画は None。
++        """
++        by_path: dict[Path, list[EPGRecording]] = {}
++        for record in await self.recordings():
++            for video in record.video_files:
++                try:
++                    path = self.canonicalPath(video.filename, require_exists=False)
++                except HTTPException:
++                    continue
++                by_path.setdefault(path, []).append(record)
++        states: dict[int, bool | None] = {}
++        for video_id, filename in files.items():
++            try:
++                matches = by_path.get(self.localPath(filename, require_exists=False), [])
++                states[video_id] = matches[0].is_protected if len(matches) == 1 else None
++            except HTTPException:
++                states[video_id] = None
++        return states
++
++    async def protection(self, video_id: int, file_path: str) -> RecordingProtection:
++        """保護状態はキャッシュせず、管理元の現在値を読む。
++
++        Args:
++            video_id: KonomiTV の録画 ID。
++            file_path: DB に記録された保存先。
++        Returns:
++            一意に対応した EPGStation の保護状態。
++        """
++        plan = await self.plan(video_id, file_path, allow_protected=True)
++        response = await self.request('GET', f'/recorded/{plan.epgstation_id}?isHalfWidth=false')
++        if response.status_code == 404:
++            raise HTTPException(409, 'Recording no longer exists in EPGStation')
++        record = EPGRecording.model_validate(response.json())
++        if record.id != plan.epgstation_id or record.is_recording or record.is_encoding:
++            raise HTTPException(409, 'Recording state changed')
++        paths = {str(self.canonicalPath(video.filename)) for video in record.video_files}
++        if paths != {file.path for file in plan.files}:
++            raise HTTPException(409, 'Recording file mapping changed')
++        return RecordingProtection(enabled=True, epgstation_id=record.id, is_protected=record.is_protected)
++
++    async def setProtection(self, video_id: int, file_path: str, update: RecordingProtectionUpdate) -> RecordingProtection:
++        """削除と同じロックで、正式 API に保護設定を委譲する。
++
++        Args:
++            video_id: KonomiTV の録画 ID。
++            file_path: DB に記録された保存先。
++            update: 確認した管理元 ID と設定したい状態。
++        Returns:
++            更新後に読み直して確認できた保護状態。
++        """
++        async with self.lock:
++            current = await self.protection(video_id, file_path)
++            if current.epgstation_id != update.epgstation_id:
++                raise HTTPException(409, 'Recording mapping changed; reopen the menu')
++            if current.is_protected != update.is_protected:
++                action = 'protect' if update.is_protected else 'unprotect'
++                response = await self.request('PUT', f'/recorded/{current.epgstation_id}/{action}')
++                if response.status_code == 404:
++                    raise HTTPException(409, 'Recording no longer exists in EPGStation')
++            result = await self.protection(video_id, file_path)
++            if result.is_protected != update.is_protected:
++                raise HTTPException(502, 'EPGStation did not confirm the protection state; reopen the menu')
++            return result
++
++    def sign(self, plan: RecordingDeletePlan) -> str:
++        """確認内容を改ざんできない短期トークンへ変換する。
++
++        Args:
++            plan: 確認画面へ渡す計画。
++        Returns:
++            確認内容と有効期限を含む署名付きトークン。
++        """
++        payload = base64.urlsafe_b64encode(plan.model_dump_json().encode()).decode()
++        signature = hmac.new(self.key, payload.encode(), hashlib.sha256).hexdigest()
++        return payload + '.' + signature
++
++    def verify(self, token: str, video_id: int) -> RecordingDeletePlan:
++        """対象 ID、有効期限、署名のすべてを検証する。
++
++        Args:
++            token: 確認画面から戻った値。
++            video_id: 削除要求の録画 ID。
++        Returns:
++            検証済みの削除計画。
++        """
++        try:
++            if len(token) > 131072:
++                raise ValueError('Token too large')
++            payload, signature = token.rsplit('.', 1)
++            expected = hmac.new(self.key, payload.encode(), hashlib.sha256).hexdigest()
++            if not hmac.compare_digest(signature, expected):
++                raise ValueError('Invalid signature')
++            plan = RecordingDeletePlan.model_validate_json(base64.urlsafe_b64decode(payload))
++            if plan.video_id != video_id or plan.expires_at < time.time():
++                raise ValueError('Expired or mismatched confirmation')
++            return plan
++        except (ValueError, UnicodeError) as ex:
++            raise HTTPException(409, 'Deletion confirmation expired or changed; open confirmation again') from ex
++
++    def saveJob(self, job: DeleteSyncJob) -> None:
++        """再試行記録を原子的に置き換え、認証情報は保存しない。
++
++        Args:
++            job: 同期の状態。
++        Returns:
++            なし。
++        """
++        target = self.config.state_directory / (job.id + '.json')
++        temporary = target.with_suffix('.tmp')
++        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++        with os.fdopen(fd, 'w') as output:
++            output.write(job.model_dump_json())
++            output.flush()
++            os.fsync(output.fileno())
++        temporary.replace(target)
++        self.event.set()
++
++    async def delete(self, video_id: int, file_path: str, token: str) -> DeleteSyncJob:
++        """確認後にも管理情報と実ファイルを照合し、削除を管理元へ委譲する。
++
++        Args:
++            video_id: KonomiTV の録画 ID。
++            file_path: DB の保存先。
++            token: 利用者が確認した内容の署名。
++        Returns:
++            削除確認と KonomiTV の同期が済んだ場合にだけ正常終了。
++        """
++        async with self.lock:
++            confirmed = self.verify(token, video_id)
++            fresh = await self.plan(video_id, file_path)
++            if fresh.epgstation_id != confirmed.epgstation_id or fresh.files != confirmed.files:
++                raise HTTPException(409, 'Recording changed after confirmation')
++            # 成長中ファイルを二重に防ぎ、直前の書き込みも検出する。
++            await asyncio.sleep(0.2)
++            for item in fresh.files:
++                if self.snapshot(self.localPath(item.path)) != item:
++                    raise HTTPException(409, 'Recording file is still changing')
++            # 削除直前にも録画・保護状態と全ファイル集合を再取得する。
++            response = await self.request('GET', f'/recorded/{fresh.epgstation_id}?isHalfWidth=false')
++            if response.status_code == 404:
++                raise HTTPException(409, 'Recording was already removed')
++            current = EPGRecording.model_validate(response.json())
++            if current.is_recording or current.is_protected or current.is_encoding:
++                raise HTTPException(409, 'Recording became active, protected, or encoding')
++            current_files = [self.snapshot(self.canonicalPath(item.filename)) for item in current.video_files]
++            if current_files != fresh.files:
++                raise HTTPException(409, 'EPGStation recording file set changed')
++            job = DeleteSyncJob(id=hashlib.sha256(token.encode()).hexdigest(), plan=confirmed, state='Prepared')
++            self.saveJob(job)
++            job.state = 'EPGDeleteRequested'
++            self.saveJob(job)
++            try:
++                await self.request('DELETE', f'/recorded/{fresh.epgstation_id}')
++                if not await self.confirmRemoved(job):
++                    raise HTTPException(502, 'EPGStation deletion is not yet confirmed; check synchronization status')
++                await self.reconcile(job)
++                if job.state == 'MetadataPending':
++                    raise HTTPException(502, 'Recording was removed; KonomiTV metadata synchronization is pending')
++                return job
++            except Exception:
++                self.event.set()
++                raise
++
++    async def confirmRemoved(self, job: DeleteSyncJob) -> bool:
++        """応答喪失時にも、再削除せず管理情報とファイルの不在を確認する。
++
++        Args:
++            job: 削除要求の記録。
++        Returns:
++            管理情報と全ファイルが消えた場合だけ True。
++        """
++        if job.plan is None:
++            return True
++        response = await self.request('GET', f'/recorded/{job.plan.epgstation_id}?isHalfWidth=false')
++        return response.status_code == 404 and all(
++            not self.localPath(item.path, require_exists=False).exists() for item in job.plan.files
++        )
++
++    async def reconcile(self, job: DeleteSyncJob) -> None:
++        """録画本体の再削除をせずに一覧同期と Jellyfin 更新だけを再試行する。
++
++        Args:
++            job: 永続化済みの同期状態。
++        Returns:
++            なし。失敗は記録し、次の再試行へ渡す。
++        """
++        from app.models.RecordedProgram import RecordedProgram
++
++        if job.state in ['Complete', 'NeedsAttention']:
++            return
++        try:
++            if job.plan is not None and job.state != 'JellyfinPending':
++                if not await self.confirmRemoved(job):
++                    # API 側に録画が残る場合、利用者の新しい確認なしで DELETE を再送しない。
++                    raise RuntimeError('Deletion not confirmed; no destructive retry was performed')
++                job.state = 'MetadataPending'
++                self.saveJob(job)
++                paths = [item.path for item in job.plan.files]
++                # SQLite は JOIN を含む DELETE を扱えないため、照合済みパスから ID を取得して削除する。
++                ids = await RecordedProgram.filter(recorded_video__file_path__in=paths).values_list('id', flat=True)
++                if ids:
++                    await RecordedProgram.filter(id__in=ids).delete()
++            job.state = 'JellyfinPending'
++            self.saveJob(job)
++            if self.config.jellyfin_url is not None:
++                if self.config.jellyfin_access_file is None:
++                    raise RuntimeError('Jellyfin access file is not configured')
++                credentials = json.loads(self.config.jellyfin_access_file.read_text())
++                token: str = credentials['token']
++                headers = {'Authorization': 'MediaBrowser Token="' + token + '"'}
++                # ライブラリ走査は非同期なので、受付応答だけを「一覧から消えた」とは扱わない。
++                if not job.jellyfin_refresh_requested:
++                    response = await self.client.post(self.config.jellyfin_url.rstrip('/') + '/Library/Refresh', headers=headers)
++                    response.raise_for_status()
++                    job.jellyfin_refresh_requested = True
++                    self.saveJob(job)
++                user_id: str = credentials['admin_id']
++                expected_paths = [item.path for item in job.plan.files] if job.plan else job.deleted_paths
++                jellyfin_root = self.config.jellyfin_recording_root or self.config.recording_root
++                expected = {str(jellyfin_root / Path(path).relative_to(self.config.recording_root)) for path in expected_paths}
++                offset = 0
++                while True:
++                    response = await self.client.get(self.config.jellyfin_url.rstrip('/') +
++                        f'/Users/{user_id}/Items?Recursive=true&Fields=Path&StartIndex={offset}&Limit=100', headers=headers)
++                    response.raise_for_status()
++                    page = JellyfinItems.model_validate(response.json())
++                    if any(item.path in expected for item in page.items):
++                        raise RuntimeError('Jellyfin scan has not removed the recording yet')
++                    offset += len(page.items)
++                    if offset >= page.total:
++                        break
++                    if not page.items:
++                        raise RuntimeError('Incomplete Jellyfin item list')
++            job.state = 'Complete'
++            job.error = None
++            self.saveJob(job)
++        except Exception as ex:
++            job.attempts += 1
++            job.retry_at = time.time() + min(3600, 30 * 2 ** min(job.attempts, 7))
++            # URL・トークンなどを例外文字列から記録しない。
++            job.error = type(ex).__name__
++            self.saveJob(job)
++            logging.warning('[RecorderDeleteSync] Metadata synchronization deferred.')
++
++    def jobs(self) -> list[DeleteSyncJob]:
++        """ローカルの復旧記録を読む。
++
++        Args:
++            なし。
++        Returns:
++            同期状態の一覧。
++        """
++        result: list[DeleteSyncJob] = []
++        for path in self.config.state_directory.glob('*.json'):
++            try:
++                result.append(DeleteSyncJob.model_validate_json(path.read_text()))
++            except ValueError:
++                # 壊れた記録を消さずに残し、ほかの同期要求まで停止させない。
++                logging.error('[RecorderDeleteSync] Invalid synchronization journal requires manual review.')
++        return result
++
++    def queueExternalRefresh(self, file_path: str) -> None:
++        """既存スキャナーが検出した外部削除を、ひとつの更新要求へまとめる。
++
++        Args:
++            file_path: 消失した録画の保存先。
++        Returns:
++            なし。
++        """
++        path = self.localPath(file_path, require_exists=False)
++        if path.exists():
++            return
++        # 自身が委譲した削除の監視通知なら、既存ジョブに任せて二重走査を避ける。
++        for job in self.jobs():
++            if job.plan is not None and job.state not in ['Complete', 'NeedsAttention']:
++                if any(item.path == str(path) for item in job.plan.files):
++                    return
++        previous = next((job for job in self.jobs() if job.id == 'external-library-refresh' and job.state != 'Complete'), None)
++        paths: list[str] = list(previous.deleted_paths) if previous else []
++        if str(path) not in paths:
++            paths.append(str(path))
++        self.saveJob(DeleteSyncJob(id='external-library-refresh', state='JellyfinPending',
++            retry_at=time.time() + 3, deleted_paths=paths))
++
++    async def runWorker(self) -> None:
++        """保留ジョブがあるときだけネットワークを使用する。
++
++        Args:
++            なし。
++        Returns:
++            停止要求で終了する。
++        """
++        while True:
++            self.event.clear()
++            async with self.lock:
++                pending = [job for job in self.jobs() if job.state not in ['Complete', 'NeedsAttention']]
++                for job in pending:
++                    if job.retry_at <= time.time():
++                        await self.reconcile(job)
++                pending = [job for job in self.jobs() if job.state not in ['Complete', 'NeedsAttention']]
++            timeout = max(1, min(job.retry_at - time.time() for job in pending)) if pending else None
++            try:
++                await asyncio.wait_for(self.event.wait(), timeout=timeout)
++            except TimeoutError:
++                pass
++
++
++_service: RecorderDeleteSync | None = None
++
++
++def GetRecorderDeleteSync() -> RecorderDeleteSync | None:
++    """有効時だけサービスを遅延生成する。
++
++    Args:
++        なし。
++    Returns:
++        サービス、または無効時の None。
++    """
++    global _service
++    if _service is None:
++        config = LoadRecorderDeleteConfig()
++        if config is not None:
++            _service = RecorderDeleteSync(config)
++    return _service
