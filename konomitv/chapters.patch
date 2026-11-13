@@ -1,0 +1,177 @@
+diff --git a/client/src/components/Watch/Panel/ChapterListDialog.vue b/client/src/components/Watch/Panel/ChapterListDialog.vue
+new file mode 100644
+index 0000000..71d33f8
+--- /dev/null
++++ b/client/src/components/Watch/Panel/ChapterListDialog.vue
+@@ -0,0 +1,119 @@
++<template>
++    <v-dialog max-width="900" transition="slide-y-transition" :model-value="show" @update:model-value="$emit('update:show', $event)">
++        <v-card class="chapter-list">
++            <v-card-title class="px-5 pt-6 pb-3 d-flex align-center font-weight-bold" style="height: 60px;">
++                <Icon icon="fluent:image-multiple-16-filled" height="24px" />
++                <span class="ml-3">場面一覧</span>
++                <v-spacer></v-spacer>
++                <div v-ripple class="d-flex align-center rounded-circle cursor-pointer px-2 py-2" @click="$emit('update:show', false)">
++                    <Icon icon="fluent:dismiss-12-filled" width="23px" height="23px" />
++                </div>
++            </v-card-title>
++            <div class="px-5 pb-6">
++                <div v-if="chapters.length === 0" class="py-6 text-center">場面サムネイルがまだ生成されていません</div>
++                <div v-else class="chapter-list__grid">
++                    <div v-for="chapter in chapters" :key="chapter.time" v-ripple class="chapter-list__item" @click="seekTo(chapter.time)">
++                        <div class="chapter-list__thumb" :style="chapter.style"></div>
++                        <div class="chapter-list__time">{{chapter.label}}</div>
++                    </div>
++                </div>
++            </div>
++        </v-card>
++    </v-dialog>
++</template>
++<script lang="ts">
++
++import { mapStores } from 'pinia';
++import { defineComponent, PropType } from 'vue';
++
++import { IRecordedProgram } from '@/services/Videos';
++import usePlayerStore from '@/stores/PlayerStore';
++import Utils from '@/utils';
++
++// ローカル改造: シークバー用タイル画像を場面サムネイルとして並べ、クリックでその場面へシークするダイアログ
++export default defineComponent({
++    name: 'ChapterListDialog',
++    props: {
++        program: {
++            type: Object as PropType<IRecordedProgram>,
++            required: true,
++        },
++        show: {
++            type: Boolean,
++            default: false,
++        },
++    },
++    emits: ['update:show'],
++    computed: {
++        ...mapStores(usePlayerStore),
++        chapters(): { time: number; label: string; style: Record<string, string> }[] {
++            const tile = this.program.recorded_video.thumbnail_info?.tile;
++            if (!tile || tile.total_tiles === 0) {
++                return [];
++            }
++            const tile_url = `${Utils.api_base_url}/videos/${this.program.id}/thumbnail/tiled`;
++            // 12 場面程度になるようタイルを間引く
++            const step = Math.max(1, Math.round(tile.total_tiles / 12));
++            const result: { time: number; label: string; style: Record<string, string> }[] = [];
++            for (let index = 0; index < tile.total_tiles; index += step) {
++                const col = index % tile.column_count;
++                const row = Math.floor(index / tile.column_count);
++                result.push({
++                    time: index * tile.interval_sec,
++                    label: formatTime(index * tile.interval_sec),
++                    style: {
++                        backgroundImage: `url("${tile_url}")`,
++                        backgroundSize: `${tile.column_count * 100}% ${tile.row_count * 100}%`,
++                        backgroundPosition: `${tile.column_count > 1 ? (col / (tile.column_count - 1)) * 100 : 0}% ${tile.row_count > 1 ? (row / (tile.row_count - 1)) * 100 : 0}%`,
++                    },
++                });
++            }
++            return result;
++        },
++    },
++    methods: {
++        seekTo(time: number): void {
++            this.playerStore.event_emitter.emit('SeekRequest', { playback_position: time });
++            this.$emit('update:show', false);
++        },
++    },
++});
++
++// 秒数を h:mm:ss / m:ss 表記にする
++function formatTime(seconds: number): string {
++    const total = Math.floor(seconds);
++    const h = Math.floor(total / 3600);
++    const m = Math.floor((total % 3600) / 60);
++    const s = total % 60;
++    const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
++    const ss = String(s).padStart(2, '0');
++    return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
++}
++
++</script>
++<style lang="scss" scoped>
++
++.chapter-list {
++    &__grid {
++        display: grid;
++        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
++        gap: 14px;
++    }
++    &__item {
++        cursor: pointer;
++    }
++    &__thumb {
++        aspect-ratio: 16 / 9;
++        background-repeat: no-repeat;
++        border-radius: 6px;
++        background-color: #000;
++    }
++    &__time {
++        margin-top: 4px;
++        font-size: 12.5px;
++        color: var(--v-theme-on-surface);
++        opacity: 0.85;
++    }
++}
++
++</style>
+diff --git a/client/src/components/Watch/Panel/RecordedProgram.vue b/client/src/components/Watch/Panel/RecordedProgram.vue
+index 358e6bf..d53a32c 100644
+--- a/client/src/components/Watch/Panel/RecordedProgram.vue
++++ b/client/src/components/Watch/Panel/RecordedProgram.vue
+@@ -61,6 +61,11 @@
+                     <Icon icon="fluent:next-16-filled" width="18px" height="18px" style="margin-bottom: -1px" />
+                     <span style="margin-left: 6px;">次の話</span>
+                 </div>
++                <div v-if="playerStore.recorded_program.recorded_video.thumbnail_info?.tile" v-ripple class="program-info__button"
++                    @click="show_chapter_list = true">
++                    <Icon icon="fluent:image-multiple-16-filled" width="18px" height="18px" style="margin-bottom: -1px" />
++                    <span style="margin-left: 6px;">場面一覧</span>
++                </div>
+             </div>
+         </section>
+         <section class="program-detail-container">
+@@ -70,6 +75,7 @@
+                 <div class="program-detail__text" v-html="Utils.URLtoLink(detail_text)"></div>
+             </div>
+         </section>
++        <ChapterListDialog :program="playerStore.recorded_program" v-model:show="show_chapter_list" />
+     </div>
+ </template>
+ <script lang="ts">
+@@ -77,6 +83,7 @@
+ import { mapStores } from 'pinia';
+ import { defineComponent } from 'vue';
+ 
++import ChapterListDialog from '@/components/Watch/Panel/ChapterListDialog.vue';
+ import Message from '@/message';
+ import usePlayerStore from '@/stores/PlayerStore';
+ import useSettingsStore from '@/stores/SettingsStore';
+@@ -84,6 +91,9 @@ import Utils, { ProgramUtils } from '@/utils';
+ 
+ export default defineComponent({
+     name: 'Panel-RecordedProgramTab',
++    components: {
++        ChapterListDialog,
++    },
+     data() {
+         return {
+             // ユーティリティをテンプレートで使えるように
+@@ -92,6 +102,9 @@ export default defineComponent({
+ 
+             // コメント数カウント
+             comment_count: null as number | null,
++
++            // 場面一覧ダイアログの表示状態
++            show_chapter_list: false,
+         };
+     },
+     computed: {

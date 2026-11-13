@@ -8,11 +8,16 @@
 |---|---|---|
 | 初期データ待ちの接続削除修正 | 初期データ待ちが10秒を超えると接続が削除される問題を修正 | 公開済み：[報告](konomitv/REPORT.md)／[パッチ](konomitv/fix.patch) |
 | 疑似フルスクリーン | 字幕・コメントを維持してプレイヤー全体を拡大 | 公開済み：[報告](konomitv/PSEUDO-FULLSCREEN.md)／[パッチ](konomitv/pseudo-fullscreen.patch) |
-| 追いかけ再生 | 録画中の番組を最初から再生可能に（PCR実測で再生可能尺を更新し、EVENTプレイリストで追随） | 公開済み：[報告](konomitv/PLAYBACK.md)／[パッチ](konomitv/chase-playback.patch) |
+| 追いかけ再生 | 録画中の番組を最初から再生可能に（PCR実測で再生可能尺を更新し、EVENTプレイリストで追随）。録画中カードを開けるようにする CSS 修正を含む | 公開済み：[報告](konomitv/PLAYBACK.md)／[パッチ](konomitv/chase-playback.patch)／[カード修正](konomitv/chase-card-click-fix.patch) |
 | シークボタン・再生速度コントロール | 再生ボタンの両脇に −30/−10/+10/+30 秒ボタン（長押しで高速シーク）、再生速度 0.75〜2 倍を端末に保存 | 公開済み：[報告](konomitv/PLAYBACK.md)／[パッチ](konomitv/seek-controls.patch) |
 | EPGStation/Jellyfin 連携 | 削除を EPGStation へ委譲（確認フロー付き）、保護状態の表示（ログアウト中も同じバッジ）と付け外し、Jellyfin への削除連動と同期リトライ | 公開済み：[報告](konomitv/EPGSTATION-INTEGRATION.md)／[パッチ](konomitv/epgstation-integration.patch) |
-| 前の話・次の話ボタン | 視聴画面から同じシリーズの前後の回へ移動。シリーズ情報がない場合はタイトル（話数表記と括弧注記を除いた番組名）の一致で判定 | ローカルで運用中（未公開） |
+| 前の話・次の話ボタン | 視聴画面から同じシリーズの前後の回へ移動。シリーズ情報がない場合はタイトル（話数表記と括弧注記を除いた番組名）の一致で判定 | 公開済み：[報告](konomitv/RECORDER-FEATURES.md)／[パッチ](konomitv/episode-nav.patch) |
+| 場面一覧 | シークバー用タイル画像を場面サムネイルとして並べ、クリックでその場面へシーク | 公開済み：[報告](konomitv/RECORDER-FEATURES.md)／[パッチ](konomitv/chapters.patch) |
+| 盛り上がり表示・ダイジェスト再生 | 過去ログコメントの密度グラフをシークバー上に表示し、盛り上がり区間だけを連続再生。ON/OFF は番組情報パネルから | 公開済み：[報告](konomitv/RECORDER-FEATURES.md)／[パッチ](konomitv/excitement.patch) ほか |
 | 番組表・予約詳細からの視聴ボタン | 番組表と予約詳細から直接視聴画面を開く | ローカルで運用中（未公開） |
+| ゴミ箱（削除の猶予） | 削除せず一覧から除外し、7日後に完全削除。復元も可能 | ローカルで運用中（未公開） |
+| 追いかけ再生の先端追従 | 先端に追いついたら通知し、止まったら先端へ戻して自動再開 | ローカルで運用中（未公開） |
+| 次話の自動再生・おやすみタイマー・コメント検索・見どころ・未視聴フィルタ・次回予約・今日のハイライト | 2026-11-13 追加のレコーダー系・コメント系機能一式（視聴画面と録画一覧） | ローカルで運用中（未公開） |
 
 ## EPGStation
 

@@ -11,6 +11,7 @@ PIX-DT295×2とpix-userland、EPGStation、KonomiTVを組み合わせた環境�
 | KonomiTV | 初期データ待ちが10秒を超えると接続が削除される問題を修正。入力待機と出力先の停滞を区別 | [報告](konomitv/REPORT.md)／[パッチ](konomitv/fix.patch) |
 | KonomiTV：録画再生の強化 | 録画中番組の追いかけ再生と、シークボタン・再生速度コントロールを追加 | [報告](konomitv/PLAYBACK.md)／[追いかけ再生パッチ](konomitv/chase-playback.patch)／[シーク・速度パッチ](konomitv/seek-controls.patch)／[一括パッチ](konomitv/playback-combined.patch) |
 | KonomiTV：EPGStation/Jellyfin 連携 | 削除をEPGStationへ委譲（確認フロー付き）、保護状態の表示（ログアウト中も）・付け外し、Jellyfinへの削除連動と同期リトライ | [報告](konomitv/EPGSTATION-INTEGRATION.md)／[パッチ](konomitv/epgstation-integration.patch) |
+| KonomiTV：レコーダー系表示機能 | 前の話・次の話ボタン、場面一覧、コメントの盛り上がり表示とダイジェスト再生、追いかけ再生のカード修正 | [報告](konomitv/RECORDER-FEATURES.md)／[次話パッチ](konomitv/episode-nav.patch)／[場面一覧パッチ](konomitv/chapters.patch)／[盛り上がりパッチ](konomitv/excitement.patch) |
 
 この環境で使っている周辺ソフトウェアの独自機能の一覧は、[独自機能一覧（ソフトウェア編）](CUSTOM-FEATURES.md)にまとめています。
 

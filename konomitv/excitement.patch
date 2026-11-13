@@ -1,0 +1,385 @@
+diff --git a/client/src/services/player/PlayerController.ts b/client/src/services/player/PlayerController.ts
+index 1956739..cf872f2 100644
+--- a/client/src/services/player/PlayerController.ts
++++ b/client/src/services/player/PlayerController.ts
+@@ -10,6 +10,7 @@ import APIClient from '@/services/APIClient';
+ import CustomBufferController from '@/services/player/CustomBufferController';
+ import CaptureManager from '@/services/player/managers/CaptureManager';
+ import DocumentPiPManager from '@/services/player/managers/DocumentPiPManager';
++import ExcitementManager from '@/services/player/managers/ExcitementManager';
+ import KeyboardShortcutManager from '@/services/player/managers/KeyboardShortcutManager';
+ import LiveCommentManager from '@/services/player/managers/LiveCommentManager';
+ import LiveDataBroadcastingManager from '@/services/player/managers/LiveDataBroadcastingManager';
+@@ -996,6 +997,7 @@ class PlayerController {
+                 new KeyboardShortcutManager(this.player, this.playback_mode),
+                 new MediaSessionManager(this.player, this.playback_mode),
+                 new SeekControlManager(this.player, this.playback_mode),
++                new ExcitementManager(this.player, this.playback_mode),
+             ];
+         }
+ 
+diff --git a/client/src/services/player/managers/ExcitementManager.ts b/client/src/services/player/managers/ExcitementManager.ts
+new file mode 100644
+index 0000000..0808929
+--- /dev/null
++++ b/client/src/services/player/managers/ExcitementManager.ts
+@@ -0,0 +1,359 @@
++import DPlayer from 'dplayer';
++
++import PlayerManager from '@/services/player/PlayerManager';
++import usePlayerStore from '@/stores/PlayerStore';
++
++
++/**
++ * 録画番組の実況コメント密度から「盛り上がり」を可視化し、ダイジェスト再生を提供する PlayerManager
++ * ローカル改造 (2026-11-13): 市販レコーダーの盛り上がりシーン検出に相当する機能を、ニコニコ実況の過去ログで実現するために新設
++ * - 過去ログコメントを 5 秒単位で集計し、シークバーの上に密度グラフ (キャンバス) を表示する
++ * - 密度が高い区間を「盛り上がり区間」として抽出し、ダイジェスト再生 ON 時はその区間だけを連続再生する
++ * - グラフをクリックするとその位置へシークする
++ * - コメントが取得できない録画 (過去ログなし等) では何も表示しない
++ */
++class ExcitementManager implements PlayerManager {
++
++    // ユーザー操作により DPlayer 側で画質が切り替わった際、この PlayerManager の再起動が必要かどうかを PlayerController に示す値
++    public readonly restart_required_when_quality_switched = false;
++
++    // 集計ビンの幅 (秒)
++    private static readonly BIN_SECONDS = 5;
++    // グラフ表示に必要な最低コメント数 (これ未満では密度が意味を持たないため表示しない)
++    private static readonly MIN_COMMENTS = 50;
++    // 盛り上がり区間とみなす密度の閾値 (最大密度に対する比率)
++    private static readonly SEGMENT_THRESHOLD_RATIO = 0.4;
++    // 盛り上がり区間の最小長 (ビン数、5秒×3=15秒)
++    private static readonly MIN_SEGMENT_BINS = 3;
++    // 盛り上がり区間の間のこのビン数以下の隙間は埋める (5秒×2=10秒)
++    private static readonly MAX_GAP_BINS = 2;
++    // 盛り上がり区間が全体のこの割合を超える場合はダイジェストの意味がないため区間なしとする
++    private static readonly MAX_COVERAGE_RATIO = 0.7;
++    // ダイジェスト再生で区間開始位置より手前から再生する秒数 (文脈の前置き)
++    private static readonly PREROLL_SECONDS = 3;
++
++    // DPlayer のインスタンス
++    private readonly player: DPlayer;
++
++    // 再生モード (Live: ライブ視聴, Video: ビデオ視聴)
++    private readonly playback_mode: 'Live' | 'Video';
++
++    // 正規化済み密度 (ビンごと、最大 1.0)
++    private densities: number[] = [];
++    // 盛り上がり区間 (秒)
++    private segments: { start: number; end: number }[] = [];
++    // 録画の長さ (秒)
++    private duration = 0;
++
++    // 追加した DOM 要素
++    private strip_element: HTMLDivElement | null = null;
++    private canvas_element: HTMLCanvasElement | null = null;
++    private digest_button: HTMLButtonElement | null = null;
++
++    // ダイジェスト再生が有効かどうか
++    private digest_enabled = false;
++    // ダイジェスト判定のスロットル用
++    private last_digest_check_ms = 0;
++
++    // イベントハンドラー (destroy 時に解除するため保持)
++    private comment_handler: ((event: { is_initial_comments: boolean; comments: { playback_position: number }[] }) => void) | null = null;
++    private timeupdate_handler: (() => void) | null = null;
++    private resize_handler: (() => void) | null = null;
++
++    /**
++     * コンストラクタ
++     * @param player DPlayer のインスタンス
++     * @param playback_mode 再生モード (Live: ライブ視聴, Video: ビデオ視聴)
++     */
++    constructor(player: DPlayer, playback_mode: 'Live' | 'Video') {
++        this.player = player;
++        this.playback_mode = playback_mode;
++    }
++
++
++    /**
++     * 過去ログコメントの受信を待ち受け、届いたらグラフを構築する
++     */
++    public async init(): Promise<void> {
++        if (this.playback_mode !== 'Video') {
++            return;
++        }
++        const player_store = usePlayerStore();
++        this.comment_handler = (event) => {
++            if (event.is_initial_comments !== true) {
++                return;
++            }
++            this.buildFromComments(event.comments.map((comment) => comment.playback_position));
++        };
++        player_store.event_emitter.on('CommentReceived', this.comment_handler);
++
++        // ダイジェスト再生の追跡
++        this.timeupdate_handler = () => this.onTimeUpdate();
++        this.player.video.addEventListener('timeupdate', this.timeupdate_handler);
++
++        console.log('[ExcitementManager] Initialized.');
++    }
++
++
++    /**
++     * 追加した要素とイベントを破棄する
++     */
++    public async destroy(): Promise<void> {
++        if (this.comment_handler !== null) {
++            usePlayerStore().event_emitter.off('CommentReceived', this.comment_handler);
++            this.comment_handler = null;
++        }
++        if (this.timeupdate_handler !== null) {
++            this.player.video.removeEventListener('timeupdate', this.timeupdate_handler);
++            this.timeupdate_handler = null;
++        }
++        if (this.resize_handler !== null) {
++            window.removeEventListener('resize', this.resize_handler);
++            this.resize_handler = null;
++        }
++        if (this.strip_element !== null) {
++            this.strip_element.remove();
++            this.strip_element = null;
++        }
++        this.canvas_element = null;
++        this.digest_button = null;
++        this.digest_enabled = false;
++    }
++
++
++    /**
++     * コメントの再生位置リストから密度と盛り上がり区間を計算し、グラフを表示する
++     * @param positions コメントの再生位置 (秒) のリスト
++     */
++    private buildFromComments(positions: number[]): void {
++        if (positions.length < ExcitementManager.MIN_COMMENTS) {
++            return;
++        }
++        const player_store = usePlayerStore();
++        const recorded_duration = player_store.recorded_program?.recorded_video.duration ?? 0;
++        const max_position = positions.reduce((max, pos) => Math.max(max, pos), 0);
++        this.duration = recorded_duration > 0 ? recorded_duration : max_position + ExcitementManager.BIN_SECONDS;
++
++        const bin_count = Math.max(1, Math.ceil(this.duration / ExcitementManager.BIN_SECONDS));
++        const counts = new Array<number>(bin_count).fill(0);
++        for (const position of positions) {
++            const index = Math.min(bin_count - 1, Math.max(0, Math.floor(position / ExcitementManager.BIN_SECONDS)));
++            counts[index] += 1;
++        }
++        // 3 ビンの移動平均で平滑化し、最大値で正規化する
++        const smoothed = counts.map((_, i) => {
++            const prev = counts[Math.max(0, i - 1)];
++            const curr = counts[i];
++            const next = counts[Math.min(bin_count - 1, i + 1)];
++            return (prev + curr * 2 + next) / 4;
++        });
++        const max_density = Math.max(...smoothed, 0.0001);
++        this.densities = smoothed.map((value) => value / max_density);
++        this.segments = this.extractSegments();
++
++        this.buildStripElement();
++        this.drawGraph();
++    }
++
++
++    /**
++     * 密度から盛り上がり区間を抽出する
++     */
++    private extractSegments(): { start: number; end: number }[] {
++        const threshold = ExcitementManager.SEGMENT_THRESHOLD_RATIO;
++        const hot = this.densities.map((density) => density >= threshold);
++        // 隙間埋め
++        for (let i = 0; i < hot.length; i++) {
++            if (hot[i] === true) {
++                continue;
++            }
++            let gap = 0;
++            while (i + gap < hot.length && hot[i + gap] === false) {
++                gap++;
++            }
++            const before = i > 0 && hot[i - 1] === true;
++            const after = i + gap < hot.length && hot[i + gap] === true;
++            if (before && after && gap <= ExcitementManager.MAX_GAP_BINS) {
++                for (let j = 0; j < gap; j++) {
++                    hot[i + j] = true;
++                }
++            }
++            i += gap;
++        }
++        // 連続区間の抽出と短い区間の除外
++        const segments: { start: number; end: number }[] = [];
++        let start_bin: number | null = null;
++        for (let i = 0; i <= hot.length; i++) {
++            if (i < hot.length && hot[i] === true) {
++                if (start_bin === null) {
++                    start_bin = i;
++                }
++            } else if (start_bin !== null) {
++                if (i - start_bin >= ExcitementManager.MIN_SEGMENT_BINS) {
++                    segments.push({
++                        start: start_bin * ExcitementManager.BIN_SECONDS,
++                        end: i * ExcitementManager.BIN_SECONDS,
++                    });
++                }
++                start_bin = null;
++            }
++        }
++        // カバー率が高すぎる場合はダイジェスト区間として扱わない (グラフ表示自体は行う)
++        const covered = segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0);
++        if (this.duration > 0 && covered / this.duration > ExcitementManager.MAX_COVERAGE_RATIO) {
++            return [];
++        }
++        return segments;
++    }
++
++
++    /**
++     * シークバーの上にグラフ表示用の帯 (キャンバス＋ダイジェストボタン) を挿入する
++     */
++    private buildStripElement(): void {
++        if (this.strip_element !== null) {
++            this.strip_element.remove();
++        }
++        const bar_wrap = this.player.container.querySelector('.dplayer-bar-wrap');
++        if (bar_wrap === null || bar_wrap.parentElement === null) {
++            return;
++        }
++        const strip = document.createElement('div');
++        strip.className = 'konomi-excitement-strip';
++        strip.setAttribute('data-balloon-nofocus', '');
++        strip.setAttribute('data-balloon-pos', 'up');
++        strip.setAttribute('aria-label', '実況コメントの盛り上がり');
++        strip.style.cssText = 'position: relative; width: 100%; height: 26px; background: rgba(0,0,0,0.25); cursor: pointer;';
++
++        const canvas = document.createElement('canvas');
++        canvas.style.cssText = 'display: block; width: 100%; height: 100%;';
++        strip.appendChild(canvas);
++        canvas.addEventListener('click', (event) => {
++            const rect = canvas.getBoundingClientRect();
++            if (rect.width <= 0 || this.duration <= 0) {
++                return;
++            }
++            const ratio = (event.clientX - rect.left) / rect.width;
++            this.player.seek(Math.min(this.duration - 0.1, Math.max(0, ratio * this.duration)));
++            this.player.play();
++        });
++
++        // 盛り上がり区間がある場合のみダイジェストボタンを表示する
++        if (this.segments.length > 0) {
++            const button = document.createElement('button');
++            button.type = 'button';
++            button.textContent = 'ダイジェスト';
++            button.style.cssText = 'position: absolute; right: 6px; top: 50%; transform: translateY(-50%);' +
++                'font-size: 11px; line-height: 1; padding: 4px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.65);' +
++                'color: #fff; background: rgba(0,0,0,0.45); cursor: pointer;';
++            button.addEventListener('click', (event) => {
++                event.stopPropagation();
++                this.toggleDigest();
++            });
++            strip.appendChild(button);
++            this.digest_button = button;
++        }
++
++        bar_wrap.parentElement.insertBefore(strip, bar_wrap);
++        this.strip_element = strip;
++        this.canvas_element = canvas;
++
++        if (this.resize_handler !== null) {
++            window.removeEventListener('resize', this.resize_handler);
++        }
++        this.resize_handler = () => this.drawGraph();
++        window.addEventListener('resize', this.resize_handler);
++    }
++
++
++    /**
++     * 密度グラフをキャンバスへ描画する
++     */
++    private drawGraph(): void {
++        const canvas = this.canvas_element;
++        if (canvas === null || this.densities.length === 0) {
++            return;
++        }
++        const rect = canvas.getBoundingClientRect();
++        if (rect.width <= 0 || rect.height <= 0) {
++            return;
++        }
++        const dpr = window.devicePixelRatio || 1;
++        canvas.width = Math.round(rect.width * dpr);
++        canvas.height = Math.round(rect.height * dpr);
++        const context = canvas.getContext('2d');
++        if (context === null) {
++            return;
++        }
++        const width = canvas.width;
++        const height = canvas.height;
++        context.clearRect(0, 0, width, height);
++        const bin_width = width / this.densities.length;
++        for (let i = 0; i < this.densities.length; i++) {
++            const bin_start = i * ExcitementManager.BIN_SECONDS;
++            const in_segment = this.segments.some((segment) => bin_start >= segment.start && bin_start < segment.end);
++            context.fillStyle = in_segment ? 'rgba(230, 79, 151, 0.95)' : 'rgba(230, 79, 151, 0.30)';
++            const bar_height = Math.max(1, this.densities[i] * (height - 2));
++            context.fillRect(i * bin_width, height - bar_height, Math.max(1, Math.ceil(bin_width)), bar_height);
++        }
++    }
++
++
++    /**
++     * ダイジェスト再生の ON/OFF を切り替える
++     */
++    private toggleDigest(): void {
++        this.digest_enabled = !this.digest_enabled;
++        if (this.digest_button !== null) {
++            this.digest_button.style.background = this.digest_enabled ? '#e64f97' : 'rgba(0,0,0,0.45)';
++            this.digest_button.style.borderColor = this.digest_enabled ? '#e64f97' : 'rgba(255,255,255,0.65)';
++        }
++        this.player.notice(this.digest_enabled ? 'ダイジェスト再生を開始しました' : 'ダイジェスト再生を終了しました');
++        if (this.digest_enabled) {
++            this.last_digest_check_ms = 0;
++            this.onTimeUpdate(true);
++        }
++    }
++
++
++    /**
++     * ダイジェスト再生中、盛り上がり区間の外にいたら次の区間の手前へシークする
++     * @param force スロットルを無視して即時判定するか
++     */
++    private onTimeUpdate(force = false): void {
++        if (!this.digest_enabled || this.segments.length === 0) {
++            return;
++        }
++        const now_ms = performance.now();
++        if (!force && now_ms - this.last_digest_check_ms < 300) {
++            return;
++        }
++        this.last_digest_check_ms = now_ms;
++        const video = this.player.video;
++        if (video.paused || video.seeking) {
++            return;
++        }
++        const now = video.currentTime;
++        const preroll = ExcitementManager.PREROLL_SECONDS;
++        const inside = this.segments.some((segment) => now >= segment.start - preroll && now < segment.end);
++        if (inside) {
++            return;
++        }
++        const next = this.segments.find((segment) => segment.end > now);
++        if (next === undefined) {
++            // すべての区間を再生し終えた
++            this.digest_enabled = false;
++            if (this.digest_button !== null) {
++                this.digest_button.style.background = 'rgba(0,0,0,0.45)';
++                this.digest_button.style.borderColor = 'rgba(255,255,255,0.65)';
++            }
++            this.player.notice('ダイジェスト再生が終了しました');
++            return;
++        }
++        this.player.seek(Math.max(0, next.start - preroll));
++        this.player.notice('盛り上がりシーンへスキップしました');
++    }
++}
++
++export default ExcitementManager;
++
